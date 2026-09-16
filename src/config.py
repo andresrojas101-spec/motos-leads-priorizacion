@@ -42,22 +42,32 @@ UMBRAL_FUZZY_MODELO = 88
 #
 # El proveedor es intercambiable por diseño: ClienteLLM es un Protocol (src/llm_cliente.py),
 # así que la lógica de negocio (prompt, validación, reintento) no sabe ni le importa cuál
-# de los dos habla por debajo. Se eligió Groq como opción por defecto porque su capa
-# gratuita no requiere tarjeta de crédito y es suficiente para el volumen de este dataset
-# (~665 conversaciones vinculadas); Anthropic queda disponible como alternativa si en algún
-# momento se dispone de presupuesto y se prioriza calidad de extracción sobre costo.
-PROVEEDOR_LLM = os.getenv("PROVEEDOR_LLM", "groq")  # "groq" | "anthropic"
+# de los tres habla por debajo.
+#
+# Historial de esta decisión: se empezó con Groq (capa gratuita en la nube) por no
+# requerir hardware propio. En la práctica, su cuota diaria (200.000 tokens/modelo)
+# resultó más restrictiva de lo esperado — se agotaron gpt-oss-20b Y gpt-oss-120b en un
+# mismo día de pruebas, y un modelo alternativo (qwen3.8-27b) resultó incompatible con
+# nuestro esquema de tool-calling. Se migró a Ollama local: sin límites de tasa ni cuota
+# diaria (el único techo es el hardware propio), verificado con el mismo formato de
+# tool-calling que ya funcionaba en Groq. Groq/Anthropic quedan como alternativas
+# documentadas y ya probadas, no se eliminó el código — es una variable de entorno, no
+# una reescritura, si algún día conviene volver a una API en la nube.
+PROVEEDOR_LLM = os.getenv("PROVEEDOR_LLM", "ollama")  # "ollama" | "groq" | "anthropic"
 
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 _MODELO_POR_DEFECTO = {
+    # llama3.1:8b: el estándar de facto para tool-calling en modelos locales abiertos,
+    # confirmado con una prueba real (tool_choice forzado -> tool_calls con JSON válido,
+    # sin ningún ajuste de prompt adicional a los ya hechos para Groq).
+    "ollama": "llama3.1:8b",
     # gpt-oss-120b, no -20b: en pruebas reales contra el dataset completo, -120b dio
     # igual o mejor calidad (confianza promedio 0.925 vs 0.876, 0 fallos de esquema) sin
     # costo extra de velocidad (ambos comparten el mismo tope de 8.000 TPM en la capa
-    # gratuita). Ademas, al ser un modelo Groq distinto, tiene su propia cuota diaria
-    # (TPD) independiente de -20b -- si alguna vuelve a agotarse, cambiar MODELO_LLM en
-    # .env a la otra da un presupuesto fresco sin esperar el reinicio diario.
+    # gratuita). Ambos modelos se agotaron el mismo día de pruebas (ver arriba).
     "groq": "openai/gpt-oss-120b",
     "anthropic": "claude-sonnet-5",
 }
@@ -66,13 +76,17 @@ _MODELO_POR_DEFECTO = {
 # fijarlo explícitamente en MODELO_LLM dentro de .env.
 MODELO_LLM = os.getenv("MODELO_LLM", _MODELO_POR_DEFECTO.get(PROVEEDOR_LLM, ""))
 
-# Concurrencia conservadora por defecto. Verificado en piloto real: la capa gratuita de
-# Groq limita por tokens/minuto A NIVEL DE CUENTA (8.000 TPM para gpt-oss-20b), no por
-# conexión — cada extracción usa ~1.200-1.900 tokens, así que el techo real es de solo
-# ~5 peticiones/minuto sin importar cuántos workers corran en paralelo. Más workers no
-# aumenta el throughput, solo multiplica los 429 que hay que reintentar. 2 es un balance
-# entre llenar el tiempo muerto de latencia de red y no generar contención innecesaria.
-EXTRACCION_MAX_WORKERS = int(os.getenv("EXTRACCION_MAX_WORKERS", "2"))
+# Concurrencia. Con Ollama (proveedor por defecto) el techo real es el hardware local, no
+# un límite de tasa remoto: un único servidor Ollama sirve un modelo cargado en memoria y
+# procesa la mayoría de requests de forma efectivamente secuencial, así que más workers
+# no acelera el batch — solo hace que varias conversaciones esperen turno de cómputo al
+# mismo tiempo en vez de una detrás de otra en la cola de este mismo proceso. 1 es lo
+# correcto para Ollama en hardware sin GPU dedicada para servir varias inferencias en
+# paralelo; subir a 2-4 solo vale la pena si se confirma que el servidor local sí
+# paraleliza bien (GPU con VRAM de sobra). Con Groq, 2 seguía siendo el balance medido en
+# piloto real (8.000 TPM de tope, ~1.200-1.900 tokens por extracción -> ~5 peticiones/min
+# sin importar cuántos workers corran).
+EXTRACCION_MAX_WORKERS = int(os.getenv("EXTRACCION_MAX_WORKERS", "1" if PROVEEDOR_LLM == "ollama" else "2"))
 
 
 def configurar_logging(nivel: int = logging.INFO) -> None:
