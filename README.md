@@ -33,8 +33,8 @@ después. Hoy, el 32 % de los leads no tiene registrado ningún primer contacto.
 | 0 | Modelo de datos, reglas de negocio, scaffolding | ✅ |
 | 1 | Ingesta + normalización + deduplicación | ✅ |
 | 2 | Extracción con IA desde conversaciones | ✅ (validado en piloto real; batch completo corriendo) |
-| 3 | Scoring y priorización validados contra el histórico | ✅ (lift 2.89x validado; CP2 pendiente de aprobación) |
-| 4 | Persistencia final + asignación a asesores | ⏳ |
+| 3 | Scoring y priorización validados contra el histórico | ✅ (lift 2.89x validado; **CP2 aprobado**) |
+| 4 | Persistencia final + asignación a asesores | ✅ (1.308 leads scoreados, 688 asignados hoy) |
 | 5 | Automatización end-to-end | ⏳ |
 | 6 | Publicación (tablero) | ⏳ |
 | 7 | Documentación y entregables | ⏳ |
@@ -48,7 +48,8 @@ cp .env.example .env          # completar GROQ_API_KEY para la Fase 2 (gratis, s
 python pipeline.py --fase 1               # ingesta + normalización + deduplicación
 python pipeline.py --fase 2 --limite 20   # extracción con IA — probar en una muestra primero
 python pipeline.py --fase 2               # extracción sobre las ~665 conversaciones vinculadas
-pytest -q                                 # 90 tests (normalizadores + extracción con IA)
+python pipeline.py --fase 4               # scoring + asignación a asesores
+pytest -q                                 # 135 tests
 python -m src.schema                      # regenera db/schema.sql
 ```
 
@@ -79,6 +80,29 @@ pierde el trabajo ya hecho.
 [HISTÓRICO]        2.200 filas  ·  tasa de cierre 9.75 %
 ```
 
+## Resultado de la Fase 4
+
+Corrido contra los datos reales (`python pipeline.py --fase 4`), con la fecha real de
+hoy como referencia:
+
+```
+[SCORING]      1.308 leads elegibles (excluye 149 descartados + 49 secundarios)
+               24 CALIENTE · 20 TIBIO · 1.264 FRÍO
+[ASIGNACIÓN]   688 de 1.308 asignados a un asesor hoy
+               620 exceden la capacidad diaria combinada de su punto de venta
+```
+
+El sesgo hacia FRÍO no es un error: la mayoría de `leads.csv` se registró en agosto de
+2026, así que evaluados "hoy" (mediados de septiembre) la mayoría ya lleva semanas sin
+avance — exactamente el problema que describe el gerente. Con
+`--fecha-referencia 2026-09-06` (más cerca de cuando esos leads eran nuevos) el
+resultado sube a 154 CALIENTE / 26 TIBIO / 1.128 FRÍO, confirmando que el score
+responde correctamente al paso del tiempo, no que esté mal calibrado.
+
+Los **620 leads que exceden la capacidad diaria** son, en sí mismos, la cuantificación
+del reclamo original: *"estamos recibiendo más leads de los que alcanzamos a
+gestionar."*
+
 ## Arquitectura
 
 **Pipeline batch determinístico con un componente puntual de IA.** De los ocho requisitos
@@ -101,7 +125,10 @@ data/raw/*.csv,json
   Scorecard de reglas ponderadas, calibrado con historico_cierres   [Fase 3 ✅]
         │
         ▼
-  Base de datos  ──►  Tablero "mis leads de hoy" filtrado por empresa   [Fases 4-6]
+  Base de datos (lead_scores + asignaciones)   [Fase 4 ✅]
+        │
+        ▼
+  Tablero "mis leads de hoy" filtrado por empresa   [Fases 5-6]
 ```
 
 ### Fase 3 — scoring: metodología y validación
@@ -222,6 +249,23 @@ Tras ambos fixes: 19/20 exitosas. También se descubrió el límite real de la c
 (8.000 tokens/minuto por cuenta, no por conexión) y se bajó la concurrencia de 4 a 2
 workers en consecuencia — más workers solo generaban más 429, no más throughput.
 
+**Un tercer límite, distinto, apareció corriendo el batch completo (645 conversaciones):
+una cuota de 200.000 tokens/DÍA, independiente de la de por minuto.** Una vez agotada,
+cada conversación siguiente fallaba garantizado — el reintento de 2s no sirve contra un
+límite que tarda horas en liberarse. El código ahora detecta este caso específicamente
+(`CuotaAgotada`) y detiene el batch sin marcar las conversaciones restantes como
+`FALLO` permanente: quedan "pendientes" para la próxima corrida, tal como estaban antes
+de intentarse. Sin esto, 575 de 645 conversaciones quedaron marcadas `FALLO` cuando en
+realidad nunca tuvieron una oportunidad real de extraerse — se limpiaron de la base real
+tras el fix.
+
+**La asignación reparte por round-robin de capacidad, no "primero al mejor asesor".**
+`distribuir_leads()` recorre los asesores de un punto de venta en rotación, saltando a
+los que ya llegaron a su tope. Un asesor con más capacidad queda disponible más turnos
+en la rotación, así que termina con más leads sin necesitar una fórmula de reparto
+proporcional explícita — y ningún asesor se queda mirando una bandeja vacía mientras
+otro acapara todos los leads calientes.
+
 ## Supuestos asumidos
 
 - `canal` en `leads.csv` es el canal de **origen**; la conversación de WhatsApp es el canal
@@ -263,12 +307,16 @@ workers en consecuencia — más workers solo generaban más 429, no más throug
 │   ├── calidad.py                Reporte y métricas de calidad
 │   ├── esquema_extraccion.py     R13 — esquema Pydantic + validación semántica
 │   ├── llm_cliente.py            R13 — clientes Groq/Anthropic (tool-use forzado)
-│   └── extraccion.py             R13 — orquestación: reintento, fallo, batch concurrente
+│   ├── extraccion.py             R13 — orquestación: reintento, fallo, batch concurrente
+│   ├── scoring.py                Fase 3 — motor de scoring, funciones puras
+│   ├── validar_scoring.py        Fase 3 — validación retro-activa contra el histórico
+│   └── asignacion.py             Fase 4 — score → BD + reparto a asesores por capacidad
 ├── db/schema.sql                 DDL PostgreSQL generado y versionado
 ├── docs/
 │   ├── modelo-datos.md           ERD y decisiones de modelado
-│   └── reglas-normalizacion.md   R1-R13 con evidencia del dataset
-├── tests/                        86 tests sobre casos reales del dataset
+│   ├── reglas-normalizacion.md   R1-R13 con evidencia del dataset
+│   └── scoring.md                Metodología del scorecard + validación (CP2)
+├── tests/                        135 tests sobre casos reales del dataset
 └── data/raw/                     Archivos fuente (sintéticos)
 ```
 

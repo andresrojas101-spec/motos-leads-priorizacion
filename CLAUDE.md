@@ -224,10 +224,50 @@ de tocar `src/scoring.py`, no repetir el razonamiento aquí.
   2.89x**, superando el 2.6x que ya daba la urgencia sola. Confirma que los componentes
   secundarios suman señal real. Cortes de temperatura (65/40) sin ajustar: el resultado
   en 3 baldes ya salió monotónico.
-- **Aún no integrado a producción**: `src/scoring.py` existe y está validado, pero no se
-  ha conectado a `leads` ni a la tabla `lead_scores` — eso es Fase 4 (CP2 del plan
-  original: revisar la lógica de scoring antes de persistirla). Pendiente de aprobación
-  del usuario antes de avanzar.
+- **CP2 aprobado por el usuario** — se integró a producción en la Fase 4 (ver abajo).
+
+## Fase 4 — persistencia de scores + asignación a asesores (detalle de implementación)
+
+- **`src/asignacion.py`** conecta el motor de la Fase 3 a la base de datos: lee
+  `leads` LEFT JOIN `enriquecimiento_conversacion`, construye un `EntradaScore` por lead
+  (enriquecimiento solo si `extraccion_status IN ('OK','REINTENTO_OK')`), calcula el
+  score y lo persiste en `lead_scores`.
+- **Población elegible**: `es_lead_canonico=True` (evita duplicar al mismo cliente vía
+  sus leads secundarios, R8) y `estado_gestion != 'DESCARTADO'`. Sobre los 1.500 leads
+  válidos: 1.308 elegibles (149 descartados + 49 secundarios excluidos, con ~6 de
+  solape).
+- **`distribuir_leads()` es una función pura** (sin DB): reparte una lista de leads ya
+  ordenada por score entre los asesores de un punto de venta, respetando
+  `capacidad_diaria_leads`, vía round-robin determinista por `asesor_id`. El round-robin
+  evita que un solo asesor se quede con todos los leads calientes mientras otros no
+  reciben nada — un asesor con más cupo sigue disponible más turnos en la rotación, así
+  que la proporción sale sola sin necesitar una fórmula de reparto explícita.
+- **Tenancy garantizada por construcción, no por un filtro adicional**: cada punto de
+  venta pertenece a una sola empresa (ya verificado en Fase 1), así que agrupar por
+  punto de venta antes de repartir hace estructuralmente imposible que un asesor reciba
+  un lead de otra empresa. Verificado con una consulta directa sobre datos reales: 0
+  cruces.
+- **`lead_scores` es refresco completo** en cada corrida (el score depende de "ahora",
+  no tiene sentido acumularlo históricamente fila a fila) — a diferencia de Fase 1, esto
+  es seguro porque ninguna tabla posterior tiene FK hacia `lead_scores`.
+  **`asignaciones` solo reemplaza el día de la corrida** (`fecha_asignacion`),
+  conservando el historial de bandejas de días anteriores.
+- **`--fecha-referencia` (CLI)**: fija el "ahora" contra el que se mide
+  `horas_sin_avance`. Hallazgo real corriendo contra los datos reales: con la fecha real
+  de hoy (2026-09-15), el resultado es 24 CALIENTE / 20 TIBIO / 1.264 FRÍO — no es un
+  bug, es el reflejo honesto de que la mayoría del backlog de `leads.csv` (registrado en
+  agosto) ya lleva semanas sin contacto un mes después de "hoy". Con
+  `--fecha-referencia 2026-09-06` (más cerca de cuando esos leads eran nuevos de verdad)
+  el resultado sube a 154 CALIENTE / 26 TIBIO / 1.128 FRÍO — confirma que el flag
+  funciona y que el sesgo hacia FRÍO es sensible a la fecha, no un error de cálculo.
+- **Resultado real de asignación** (con "ahora" real): 688 de 1.308 leads asignados hoy,
+  **620 exceden la capacidad diaria combinada de su punto de venta** y quedan para
+  mañana — el propio pipeline hace visible, con números, el problema original del
+  gerente ("estamos recibiendo más leads de los que alcanzamos a gestionar").
+- 14 tests nuevos (135 en total): `distribuir_leads` cubierto con función pura (respeta
+  capacidad, reparte proporcional sin volcar todo al primer asesor, orden determinista,
+  casos borde sin asesores/sin leads); integración con DB en memoria para exclusión de
+  descartados/secundarios, tenancy, tope diario, y refresco parcial vs. completo.
 
 ## Estado por fases
 
@@ -235,11 +275,13 @@ de tocar `src/scoring.py`, no repetir el razonamiento aquí.
 - [x] **Fase 1** — Ingesta + normalización + deduplicación
 - [x] **Fase 2** — Extracción con IA desde conversaciones (código completo, testeado, y
       validado con piloto real contra Groq: 19/20 exitosas, más el fix de persistencia
-      incremental. Batch completo de ~665 conversaciones corriendo en background)
+      incremental y el fix de cuota diaria. Batch completo (~665 conversaciones) sigue
+      pendiente de terminar de correr — bloqueado por la cuota diaria de la capa gratuita)
 - [x] **Fase 3** — Scoring y priorización: motor implementado, validado contra histórico
-      (lift 2.89x CALIENTE/FRÍO). **CP2 pendiente de aprobación del usuario** antes de
-      persistir a producción (Fase 4)
-- [ ] **Fase 4** — Persistencia final + asignación a asesores
+      (lift 2.89x CALIENTE/FRÍO). **CP2 aprobado por el usuario**
+- [x] **Fase 4** — Scoring persistido (`lead_scores`) + asignación a asesores
+      (`asignaciones`) corriendo contra datos reales: 1.308 leads scoreados, 688
+      asignados, 620 exceden capacidad diaria
 - [ ] **Fase 5** — Automatización end-to-end
 - [ ] **Fase 6** — Publicación (tablero)
 - [ ] **Fase 7** — Documentación y entregables
