@@ -41,7 +41,8 @@ def ejecutar_fase1() -> ColectorMetricas:
     engine = create_engine(DATABASE_URL)
 
     log.info("Iniciando %s sobre %s", run_id, engine.url.render_as_string(hide_password=True))
-    schema.metadata.drop_all(engine)
+    # Se reconstruyen solo las tablas de datos; el historial de auditoria se conserva.
+    schema.metadata.drop_all(engine, tables=schema.tablas_de_datos())
     schema.metadata.create_all(engine)
 
     with engine.begin() as conn:

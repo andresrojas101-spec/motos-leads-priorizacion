@@ -274,6 +274,17 @@ metricas_calidad = Table(
 )
 
 
+# Tablas de auditoría: sobreviven al refresco completo. Su valor está justamente en
+# poder comparar la calidad de los datos entre corridas ("¿hoy entraron más rechazos
+# que ayer?"), así que borrarlas en cada ejecución las haría inútiles.
+TABLAS_AUDITORIA = frozenset({"ejecuciones", "metricas_calidad"})
+
+
+def tablas_de_datos() -> list:
+    """Tablas que se reconstruyen en cada corrida, en orden seguro para el DROP."""
+    return [t for t in reversed(metadata.sorted_tables) if t.name not in TABLAS_AUDITORIA]
+
+
 def emitir_ddl_postgres() -> str:
     """Genera el DDL completo en dialecto PostgreSQL."""
     from sqlalchemy.dialects import postgresql
