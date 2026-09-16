@@ -189,6 +189,26 @@ completo sí es una feature). Test que prueba la propiedad real (no solo el meca
 simula un fallo externo a mitad de un batch y verifica que el lote ya commiteado
 sobrevive.
 
+**Watchdog contra hangs silenciosos (fix posterior, encontrado en la práctica)**: un
+proceso de `--fase 2` quedó vivo más de una hora sin producir ni una línea de log.
+Investigué el SDK de Groq leyendo su código fuente (no asumiendo): mi hipótesis inicial
+—que el SDK honraba literalmente los ~10 minutos de espera que sugieren los errores de
+cuota diaria— era **falsa**; `_calculate_retry_timeout()` descarta cualquier
+`Retry-After` mayor a 60s y usa backoff exponencial con techo de 8s. La causa exacta del
+hang quedó sin confirmar (sospecha: alguna anomalía de red/DNS en Windows que ignoró los
+timeouts de httpx), así que en vez de perseguir una causa no verificable, se construyó
+una garantía que no depende de identificarla: `ejecutar_extraccion` reemplazó
+`as_completed()` (bloquea sin fecha límite) por `wait(..., timeout=
+PLAZO_SIN_PROGRESO_SEGUNDOS, return_when=FIRST_COMPLETED)` en un bucle — si nada completa
+en 240s, se asume un hang real y se abandona el resto del batch (reanudable). De paso se
+encontró y corrigió un segundo bug real: `with ThreadPoolExecutor(...)` siempre llama
+`shutdown(wait=True)` al salir, **sin importar** que ya se hubiera llamado
+`shutdown(wait=False)` adentro del bloque — un hilo colgado hacía que salir del `with` se
+quedara esperando exactamente lo mismo que el watchdog acababa de decidir no esperar. El
+pool ahora se crea y cierra a mano. También apareció un `CancelledError` sin capturar
+(futuros cancelados por `cancel_futures=True` lanzan esto, no `CuotaAgotada`) que habría
+tumbado la corrida con un traceback en vez de terminar prolijamente.
+
 ## Fase 3 — scoring y priorización (detalle de implementación)
 
 Metodología completa, tablas de evidencia y validación en `docs/scoring.md` — léelo antes
