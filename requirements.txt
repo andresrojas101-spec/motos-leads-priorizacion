@@ -6,7 +6,8 @@ python-dotenv>=1.0
 
 # Fase 2 - extraccion con IA (validacion de salida estructurada)
 pydantic>=2.7
-anthropic>=0.40
+groq>=0.11        # proveedor por defecto: capa gratuita, sin tarjeta
+anthropic>=0.40   # alternativo, ver PROVEEDOR_LLM en .env
 
 # Desarrollo
 pytest>=8.0

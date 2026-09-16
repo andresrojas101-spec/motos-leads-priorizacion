@@ -18,7 +18,7 @@ from sqlalchemy import create_engine
 
 from src import schema
 from src.calidad import ColectorMetricas
-from src.config import ANTHROPIC_API_KEY, DATABASE_URL, MODELO_LLM, configurar_logging
+from src.config import DATABASE_URL, MODELO_LLM, PROVEEDOR_LLM, configurar_logging
 from src.dedup import construir_personas, persistir_personas
 from src.extraccion import ejecutar_extraccion
 from src.ingesta import (
@@ -79,20 +79,21 @@ def ejecutar_fase2(limite: int | None = None) -> ColectorMetricas:
     `enriquecimiento_conversacion`, asi que una corrida interrumpida se completa
     volviendo a lanzar el mismo comando.
     """
-    if not ANTHROPIC_API_KEY:
-        raise SystemExit(
-            "ANTHROPIC_API_KEY no esta configurada. Copia .env.example a .env y "
-            "completa la llave antes de correr la Fase 2."
-        )
+    from src.llm_cliente import construir_cliente_llm
 
-    from src.llm_cliente import ClienteAnthropic
+    try:
+        cliente = construir_cliente_llm()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
 
     run_id = f"fase2-{datetime.now():%Y%m%d-%H%M%S}"
     metricas = ColectorMetricas(run_id=run_id, fase="fase2")
     engine = create_engine(DATABASE_URL)
-    cliente = ClienteAnthropic(api_key=ANTHROPIC_API_KEY, modelo=MODELO_LLM)
 
-    log.info("Iniciando %s con modelo %s%s", run_id, MODELO_LLM, f" (limite={limite})" if limite else "")
+    log.info(
+        "Iniciando %s con proveedor=%s modelo=%s%s",
+        run_id, PROVEEDOR_LLM, MODELO_LLM, f" (limite={limite})" if limite else "",
+    )
 
     with engine.begin() as conn:
         ejecutar_extraccion(conn, cliente, metricas, limite=limite)
