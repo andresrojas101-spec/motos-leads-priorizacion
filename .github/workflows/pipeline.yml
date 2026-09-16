@@ -1,0 +1,51 @@
+name: Pipeline de priorizacion de leads
+
+# Un solo disparo corre el pipeline completo sin intervencion manual (Fase 5).
+# - schedule: corrida diaria automatica.
+# - workflow_dispatch: disparo manual desde la pestaña Actions (demo/verificacion).
+#
+# Requiere el secret DATABASE_URL apuntando a un Postgres accesible desde el runner
+# (Supabase u otro host administrado -- el Postgres local en docker-compose.yml es solo
+# para desarrollo, no lo ve GitHub Actions). Ver CLAUDE.md, seccion "Fase 5".
+on:
+  schedule:
+    - cron: "0 9 * * *" # 09:00 UTC ~ 04:00 hora Colombia
+  workflow_dispatch: {}
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    # Generoso a proposito: la primera corrida contra una base vacia extrae ~665
+    # conversaciones con un modelo local por CPU (~2-3h medido en la maquina de
+    # desarrollo). Corridas siguientes son incrementales (Fase 2 es reanudable: solo
+    # procesa conversaciones sin fila en enriquecimiento_conversacion) y terminan en
+    # minutos.
+    timeout-minutes: 300
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      PROVEEDOR_LLM: ollama
+      OLLAMA_BASE_URL: http://localhost:11434/v1
+      MODELO_LLM: llama3.1:8b
+      EXTRACCION_MAX_WORKERS: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Instalar y arrancar Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:11434/api/tags > /dev/null && break
+            sleep 2
+          done
+          ollama pull "$MODELO_LLM"
+
+      - name: Correr pipeline completo (fases 1, 2, 4)
+        run: python pipeline.py
