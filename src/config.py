@@ -39,9 +39,31 @@ UMBRAL_FUZZY_CIUDAD = 90
 UMBRAL_FUZZY_MODELO = 88
 
 # Fase 2 - extracción con IA desde conversaciones (ver docs/reglas-normalizacion.md, R13).
+#
+# El proveedor es intercambiable por diseño: ClienteLLM es un Protocol (src/llm_cliente.py),
+# así que la lógica de negocio (prompt, validación, reintento) no sabe ni le importa cuál
+# de los dos habla por debajo. Se eligió Groq como opción por defecto porque su capa
+# gratuita no requiere tarjeta de crédito y es suficiente para el volumen de este dataset
+# (~665 conversaciones vinculadas); Anthropic queda disponible como alternativa si en algún
+# momento se dispone de presupuesto y se prioriza calidad de extracción sobre costo.
+PROVEEDOR_LLM = os.getenv("PROVEEDOR_LLM", "groq")  # "groq" | "anthropic"
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-MODELO_LLM = os.getenv("MODELO_LLM", "claude-sonnet-5")
-EXTRACCION_MAX_WORKERS = int(os.getenv("EXTRACCION_MAX_WORKERS", "8"))
+
+_MODELO_POR_DEFECTO = {
+    "groq": "llama-3.3-70b-versatile",
+    "anthropic": "claude-sonnet-5",
+}
+# El catálogo de modelos de Groq cambia con más frecuencia que el de Anthropic: si el
+# nombre de abajo ya no existe, revisar los modelos vigentes en console.groq.com y
+# fijarlo explícitamente en MODELO_LLM dentro de .env.
+MODELO_LLM = os.getenv("MODELO_LLM", _MODELO_POR_DEFECTO.get(PROVEEDOR_LLM, ""))
+
+# Concurrencia conservadora por defecto: las cuentas gratuitas de Groq limitan peticiones
+# por minuto: valores altos aquí disparan más 429 (rate limit) de los que vale la pena
+# absorber con reintentos. Subir si tu plan lo permite.
+EXTRACCION_MAX_WORKERS = int(os.getenv("EXTRACCION_MAX_WORKERS", "4"))
 
 
 def configurar_logging(nivel: int = logging.INFO) -> None:

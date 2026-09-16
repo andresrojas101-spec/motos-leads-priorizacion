@@ -1,9 +1,11 @@
 """Cliente LLM para la extracción de la Fase 2.
 
-Se define como un Protocol en vez de importar `anthropic` directamente en
+Se define como un Protocol en vez de importar `anthropic`/`groq` directamente en
 `extraccion.py` para que la lógica de negocio (prompt, validación, reintento) se pueda
-testear con un cliente falso, sin red ni API key. `ClienteAnthropic` es la única pieza
-que de verdad habla con la API.
+testear con un cliente falso, sin red ni API key. `ClienteGroq` y `ClienteAnthropic` son
+las únicas piezas que de verdad hablan con una API, y `construir_cliente_llm()` elige
+cuál instanciar según `PROVEEDOR_LLM` — cambiar de proveedor es una variable de entorno,
+no un cambio de código.
 """
 
 from __future__ import annotations
@@ -97,6 +99,79 @@ class ClienteAnthropic:
         if bloque_tool is None:
             raise ValueError("El modelo no invocó la herramienta de extracción")
         return bloque_tool.input
+
+
+class ClienteGroq:
+    """Implementación real sobre la API de Groq (capa gratuita, sin tarjeta).
+
+    Groq expone un formato de tool-calling compatible con OpenAI (distinto al de
+    Anthropic: aquí el schema va anidado bajo `function`, y el bloque de respuesta trae
+    los argumentos como una cadena JSON, no como un dict ya parseado). Fuera de ese
+    detalle de transporte, el contrato con `extraccion.py` es idéntico al de
+    `ClienteAnthropic` — ambos devuelven un dict crudo vía `extraer()`.
+    """
+
+    def __init__(self, api_key: str, modelo: str) -> None:
+        import groq  # import perezoso: los tests no necesitan el paquete instalado
+
+        self._cliente = groq.Groq(api_key=api_key)
+        self._modelo = modelo
+        self._tool = {
+            "type": "function",
+            "function": {
+                "name": NOMBRE_TOOL,
+                "description": "Registra los datos extraídos de la conversación con el cliente.",
+                "parameters": json_schema_para_tool(),
+            },
+        }
+
+    def extraer(self, transcripcion: str, *, reintento: bool = False) -> dict:
+        prompt = construir_prompt(transcripcion)
+        if reintento:
+            prompt += _INSTRUCCION_REINTENTO
+
+        respuesta = self._cliente.chat.completions.create(
+            model=self._modelo,
+            max_tokens=1024,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            tools=[self._tool],
+            tool_choice={"type": "function", "function": {"name": NOMBRE_TOOL}},
+        )
+
+        llamadas = respuesta.choices[0].message.tool_calls
+        if not llamadas:
+            raise ValueError("El modelo no invocó la herramienta de extracción")
+        return json.loads(llamadas[0].function.arguments)
+
+
+_CLIENTES = {"groq": ClienteGroq, "anthropic": ClienteAnthropic}
+
+
+def construir_cliente_llm() -> "ClienteLLM":
+    """Instancia el cliente real según `PROVEEDOR_LLM` (ver src/config.py).
+
+    Punto único donde vive la decisión de proveedor. `pipeline.py` no importa
+    `ClienteGroq` ni `ClienteAnthropic` directamente para que agregar un tercer
+    proveedor no requiera tocar el punto de entrada del pipeline.
+    """
+    from src.config import ANTHROPIC_API_KEY, GROQ_API_KEY, MODELO_LLM, PROVEEDOR_LLM
+
+    claves = {"groq": GROQ_API_KEY, "anthropic": ANTHROPIC_API_KEY}
+    variables_env = {"groq": "GROQ_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+
+    if PROVEEDOR_LLM not in _CLIENTES:
+        raise RuntimeError(
+            f"PROVEEDOR_LLM={PROVEEDOR_LLM!r} no reconocido. Usa 'groq' o 'anthropic'."
+        )
+    if not claves[PROVEEDOR_LLM]:
+        raise RuntimeError(
+            f"{variables_env[PROVEEDOR_LLM]} no está configurada. Copia .env.example a "
+            f".env y completa la llave antes de correr la Fase 2 (proveedor: {PROVEEDOR_LLM})."
+        )
+    return _CLIENTES[PROVEEDOR_LLM](api_key=claves[PROVEEDOR_LLM], modelo=MODELO_LLM)
 
 
 def formatear_transcripcion(mensajes: list[dict]) -> str:
