@@ -71,6 +71,111 @@ def test_presupuesto_como_string_no_convertible_dispara_validation_error():
 
 
 # --------------------------------------------------------------------------------------
+# Normalización de quirks de formato de modelos locales (Ollama) — casos REALES
+# capturados corriendo llama3.2:3b y llama3.1:8b, no inventados. La normalización
+# corrige representación (mismo valor, tipo distinto); nunca corrige significado
+# (campo ausente, enum inventado): esos deben seguir fallando.
+# --------------------------------------------------------------------------------------
+
+
+def test_null_como_string_se_normaliza_a_none():
+    """Real: {'presupuesto_monto': 'null'} -- la palabra entre comillas, no JSON null."""
+    datos = parsear_y_validar(dict(RESPUESTA_VALIDA, presupuesto_monto="null"))
+    assert datos.presupuesto_monto is None
+
+
+def test_variantes_de_nulo_se_normalizan():
+    for variante in ["null", "NULL", "None", "nil", "  null  ", ""]:
+        datos = parsear_y_validar(dict(RESPUESTA_VALIDA, presupuesto_monto=variante))
+        assert datos.presupuesto_monto is None, f"fallo con variante {variante!r}"
+
+
+def test_booleano_como_string_se_normaliza():
+    """Real: {'pidio_cita': 'true'} en vez de un booleano JSON."""
+    datos = parsear_y_validar(dict(RESPUESTA_VALIDA, pidio_cita="true", pidio_cotizacion="false"))
+    assert datos.pidio_cita is True
+    assert datos.pidio_cotizacion is False
+
+
+def test_numero_como_string_se_normaliza():
+    """Real: {'presupuesto_monto': '2000000'} -- entero valido pero entre comillas."""
+    datos = parsear_y_validar(dict(RESPUESTA_VALIDA, presupuesto_monto="2000000"))
+    assert datos.presupuesto_monto == 2_000_000
+
+
+def test_confianza_como_string_numerico_se_normaliza():
+    datos = parsear_y_validar(dict(RESPUESTA_VALIDA, confianza_global="0.75"))
+    assert datos.confianza_global == 0.75
+
+
+@pytest.mark.parametrize(
+    "campo,sucio,limpio",
+    [
+        ("forma_pago", " credito ", "CREDITO"),
+        ("intencion", " media ", "MEDIA"),
+        ("objecion_principal", " NINGUNA ", "NINGUNA"),
+        ("objecion_principal", " Ninguna", "NINGUNA"),
+    ],
+)
+def test_enum_con_espacios_o_minusculas_se_normaliza(campo, sucio, limpio):
+    """Reales: ' credito ', ' media ', ' NINGUNA ', ' Ninguna' -- el modelo entendio el
+    valor correcto pero no sostuvo mayusculas exactas ni omitio el espaciado."""
+    datos = parsear_y_validar(dict(RESPUESTA_VALIDA, **{campo: sucio}))
+    assert getattr(datos, campo).value == limpio
+
+
+def test_enum_inventado_sigue_fallando_pese_a_la_normalizacion():
+    """Real: {'objecion_principal': 'DATA_CREDITO'} -- el modelo alucino una categoria
+    que no existe en el esquema. La normalizacion la deja en mayuscula ('DATA_CREDITO')
+    pero sigue sin ser un valor valido: no se debe adivinar a cual de las 7 categorias
+    reales correspondia, eso es responsabilidad del reintento de R13, no de este parser."""
+    invalida = dict(RESPUESTA_VALIDA, objecion_principal="DATA_CREDITO")
+    with pytest.raises(ValidationError):
+        parsear_y_validar(invalida)
+
+
+def test_booleano_requerido_en_none_sigue_fallando():
+    """Real: {'pidio_cita': None} -- a diferencia de presupuesto_monto (que SI puede ser
+    None), pidio_cita es un booleano obligatorio: el cliente pidio cita o no la pidio,
+    no hay un tercer estado. Un None aqui es un fallo genuino de instrucciones, no un
+    quirk de formato corregible."""
+    invalida = dict(RESPUESTA_VALIDA, pidio_cita=None)
+    with pytest.raises(ValidationError):
+        parsear_y_validar(invalida)
+
+
+def test_clave_ausente_sigue_fallando_pese_a_la_normalizacion():
+    """La normalizacion actua sobre valores presentes con tipo incorrecto -- no puede
+    (ni debe) inventar una clave que el modelo omitio por completo."""
+    incompleta = {k: v for k, v in RESPUESTA_VALIDA.items() if k != "intencion"}
+    with pytest.raises(ValidationError):
+        parsear_y_validar(incompleta)
+
+
+def test_combinacion_realista_de_varios_quirks_a_la_vez():
+    """Aproxima una respuesta real de llama3.2:3b: varios quirks de formato juntos, sin
+    ningun campo genuinamente ausente ni ningun enum inventado -- debe pasar limpio."""
+    sucia = {
+        "modelo_interes_texto": "  Bajaj Discover 125  ",
+        "presupuesto_monto": "2000000",
+        "forma_pago": " credito ",
+        "intencion": " alta ",
+        "objecion_principal": "Ninguna",
+        "pidio_cita": "true",
+        "pidio_cotizacion": "false",
+        "confianza_global": "0.8",
+    }
+    datos = parsear_y_validar(sucia)
+    assert datos.presupuesto_monto == 2_000_000
+    assert datos.forma_pago.value == "CREDITO"
+    assert datos.intencion.value == "ALTA"
+    assert datos.objecion_principal.value == "NINGUNA"
+    assert datos.pidio_cita is True
+    assert datos.pidio_cotizacion is False
+    assert datos.confianza_global == 0.8
+
+
+# --------------------------------------------------------------------------------------
 # Segunda puerta: reglas semánticas que Pydantic no expresa por sí solo
 # --------------------------------------------------------------------------------------
 

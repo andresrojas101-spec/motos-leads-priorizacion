@@ -113,13 +113,72 @@ class ResultadoValidacion(BaseModel):
     presupuesto_descartado: bool = False
 
 
+# Campos que deben quedar en uno de los valores de su Enum tras normalizar.
+_CAMPOS_ENUM = frozenset({"forma_pago", "intencion", "objecion_principal"})
+# Campos booleanos que un modelo local a veces serializa como texto ("true"/"false").
+_CAMPOS_BOOL = frozenset({"pidio_cita", "pidio_cotizacion"})
+# Variantes textuales de "sin valor" observadas en modelos locales (Ollama): en vez de
+# omitir la clave o escribir JSON null, escriben la palabra "null" como STRING.
+_NULOS_LITERALES = frozenset({"null", "none", "nil", "n/a", ""})
+
+
+def _normalizar_tipos_laxos(payload: dict) -> dict:
+    """Corrige quirks de *formato* observados en modelos locales antes de la validación
+    estricta de Pydantic — nunca quirks de *significado*.
+
+    Encontrado corriendo `llama3.2:3b` y, con menor frecuencia, `llama3.1:8b`: el modelo
+    entiende el contenido correctamente pero no sostiene el tipado estricto del JSON a
+    lo largo de toda la respuesta. Ejemplos reales capturados en logs:
+    - `"presupuesto_monto": "null"` (el texto "null" entre comillas, no el literal JSON)
+    - `"forma_pago": " credito "` (minúscula y espacios en vez de `"CREDITO"`)
+    - `"pidio_cita": "true"` (string en vez de booleano)
+    - `"presupuesto_monto": "2000000"` (número como string)
+
+    En todos estos casos el modelo YA decidió el valor correcto — solo lo escribió en el
+    tipo equivocado. Corregir la representación no es inventar información.
+
+    Lo que esta función **no** toca, a propósito: una clave ausente por completo, un
+    `objecion_principal` con un valor que no existe en el Enum (ej. el real
+    `"DATA_CREDITO"`, que el modelo alucinó a partir del contexto de la conversación), o
+    un booleano requerido en `None`. Esos son fallos genuinos de seguimiento de
+    instrucciones, no de formato — deben seguir disparando el reintento de R13, no
+    ocultarse detrás de una normalización silenciosa.
+    """
+    limpio: dict = {}
+    for clave, valor in payload.items():
+        if not isinstance(valor, str):
+            limpio[clave] = valor
+            continue
+
+        v = valor.strip()
+        if v.lower() in _NULOS_LITERALES:
+            limpio[clave] = None
+        elif clave in _CAMPOS_BOOL and v.lower() in ("true", "false"):
+            limpio[clave] = v.lower() == "true"
+        elif clave == "presupuesto_monto" and v.lstrip("-").isdigit():
+            limpio[clave] = int(v)
+        elif clave == "confianza_global":
+            try:
+                limpio[clave] = float(v)
+            except ValueError:
+                limpio[clave] = v  # deja que Pydantic reporte el error real
+        elif clave in _CAMPOS_ENUM:
+            limpio[clave] = v.upper()
+        else:
+            limpio[clave] = v  # otros strings: solo el .strip() ya aplicado
+
+    return limpio
+
+
 def parsear_y_validar(payload: dict) -> RespuestaExtraccion:
-    """Valida tipos/enums. Lanza pydantic.ValidationError si la forma no coincide.
+    """Normaliza quirks de formato conocidos y valida tipos/enums.
 
     Es la primera puerta del gate de calidad: una respuesta que no calza con el esquema
-    (JSON mal formado, enum inventado, campo faltante) dispara el reintento en R13.
+    (JSON mal formado, enum inventado, campo faltante) dispara el reintento en R13,
+    incluso después de la normalización — esta solo repara representación, no inventa
+    datos que el modelo no proveyó.
     """
-    return RespuestaExtraccion.model_validate(payload)
+    return RespuestaExtraccion.model_validate(_normalizar_tipos_laxos(payload))
 
 
 def validar_semantica(datos: RespuestaExtraccion) -> ResultadoValidacion:
