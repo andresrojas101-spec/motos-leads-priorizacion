@@ -141,11 +141,17 @@ class ClienteGroq:
     def __init__(self, api_key: str, modelo: str) -> None:
         import groq  # import perezoso: los tests no necesitan el paquete instalado
 
-        # max_retries alto a propósito: el límite de la capa gratuita es por tokens/minuto
-        # de la cuenta (no por conexión), así que un 429 es esperable, no excepcional.
-        # El SDK ya sabe leer el "Retry-After" real que manda Groq y esperar ese tiempo
-        # exacto — más preciso que cualquier backoff fijo que pudiéramos escribir a mano.
-        self._cliente = groq.Groq(api_key=api_key, max_retries=5)
+        # timeout total mas corto que el default del SDK (60s): limita cuanto puede
+        # tardar UN intento HTTP antes de que el propio cliente lo de por perdido.
+        # max_retries=3 (no 5): el SDK solo honra el header Retry-After tal cual si es
+        # <=60s (verificado leyendo groq/_base_client.py); para cualquier valor mayor
+        # -- como los ~10 minutos que sugiere un 429 de cuota DIARIA -- cae a backoff
+        # exponencial con techo de 8s, asi que 5 vs 3 reintentos no cambia el peor caso
+        # de forma significativa, pero reduce cuanto tiempo se pierde en casos borde.
+        # La garantia real contra que esto vuelva a colgar el batch por horas es el
+        # limite de tiempo por lote en ejecutar_extraccion (ver PLAZO_MAXIMO_LOTE_SEGUNDOS
+        # en extraccion.py), que no depende de que el SDK ni la red se comporten bien.
+        self._cliente = groq.Groq(api_key=api_key, max_retries=3, timeout=30.0)
         self._modelo = modelo
         self._tool = {
             "type": "function",
