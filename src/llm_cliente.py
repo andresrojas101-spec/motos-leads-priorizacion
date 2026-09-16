@@ -14,12 +14,24 @@ import json
 import logging
 from typing import Protocol
 
-from src.esquema_extraccion import json_schema_para_tool
+from src.esquema_extraccion import FormaPago, Intencion, ObjecionPrincipal, json_schema_para_tool
 
 log = logging.getLogger(__name__)
 
 NOMBRE_TOOL = "registrar_extraccion"
 
+
+def _lista(enum_cls) -> str:
+    return ", ".join(v.value for v in enum_cls)
+
+
+# Construido desde los mismos enums de Pydantic que validan la respuesta (nunca a mano):
+# si el esquema cambia, el prompt no puede quedar desincronizado. Es la reparación
+# directa de un fallo real observado con gpt-oss-20b en Groq: el modelo inventaba
+# valores como "INTERESADO" o "COMPRAR" para `intencion` porque el prompt anterior no
+# enumeraba las opciones válidas de forma explícita, solo confiaba en que el modelo
+# leyera el enum del JSON schema — un modelo abierto de 20B no lo hace de forma
+# confiable, a diferencia de un modelo propietario más grande.
 _SYSTEM_PROMPT = """Eres un analista que lee transcripciones de WhatsApp entre un \
 cliente y un asesor de ventas de motos en Colombia, y extrae la información que el \
 CLIENTE reveló sobre su intención de compra.
@@ -32,15 +44,30 @@ una cifra si el CLIENTE la menciona como lo que tiene, puede pagar o dar de inic
 - Si el cliente cambia de modelo durante la conversación (por ejemplo, el asesor ofrece \
 una alternativa más económica y el cliente la acepta), reporta el último modelo que \
 el cliente aceptó, no el primero que preguntó.
-- Si la conversación no da información para un campo, dilo con null en vez de adivinar.
+- `modelo_interes_texto` y `presupuesto_monto` SÍ pueden ir null si la conversación no \
+da esa información. NUNCA inventes una cifra o un modelo que el cliente no mencionó.
+- `forma_pago`, `intencion` y `objecion_principal` son OBLIGATORIOS: jamás pueden ir \
+null ni pueden llevar una palabra que no esté en su lista de abajo. Si la conversación \
+no da información clara, usa el valor que representa "no sé"/"no aplica" de esa misma \
+lista (NO_INFORMA, BAJA o NINGUNA respectivamente) en vez de dejarlo vacío o inventar \
+una palabra nueva.
+  - forma_pago: EXACTAMENTE uno de estos valores, tal cual: {forma_pago}
+  - intencion: EXACTAMENTE uno de estos valores, tal cual: {intencion}
+  - objecion_principal: EXACTAMENTE uno de estos valores, tal cual: {objecion}
+- Nunca uses sinónimos ni palabras propias para esos tres campos (por ejemplo, nunca \
+escribas "INTERESADO" o "COMPRAR": esas palabras no existen en las listas de arriba).
 - Registra el resultado exclusivamente con la herramienta {tool}, sin texto adicional.""".format(
-    tool=NOMBRE_TOOL
+    tool=NOMBRE_TOOL,
+    forma_pago=_lista(FormaPago),
+    intencion=_lista(Intencion),
+    objecion=_lista(ObjecionPrincipal),
 )
 
 _INSTRUCCION_REINTENTO = """\n\nIMPORTANTE: tu respuesta anterior no cumplió el formato \
-exigido. Responde otra vez usando EXCLUSIVAMENTE la herramienta {tool} con todos sus \
-campos obligatorios bien tipados (enums en mayúsculas exactas, booleanos true/false, \
-números sin comas ni símbolos de moneda).""".format(tool=NOMBRE_TOOL)
+exigido. Responde otra vez usando EXCLUSIVAMENTE la herramienta {tool}. Revisa en \
+especial `forma_pago`, `intencion` y `objecion_principal`: deben ser EXACTAMENTE uno de \
+los valores permitidos que se listaron en las instrucciones (nunca null, nunca una \
+palabra inventada). Números sin comas ni símbolos de moneda.""".format(tool=NOMBRE_TOOL)
 
 
 def construir_prompt(transcripcion: str) -> str:
@@ -114,7 +141,11 @@ class ClienteGroq:
     def __init__(self, api_key: str, modelo: str) -> None:
         import groq  # import perezoso: los tests no necesitan el paquete instalado
 
-        self._cliente = groq.Groq(api_key=api_key)
+        # max_retries alto a propósito: el límite de la capa gratuita es por tokens/minuto
+        # de la cuenta (no por conexión), así que un 429 es esperable, no excepcional.
+        # El SDK ya sabe leer el "Retry-After" real que manda Groq y esperar ese tiempo
+        # exacto — más preciso que cualquier backoff fijo que pudiéramos escribir a mano.
+        self._cliente = groq.Groq(api_key=api_key, max_retries=5)
         self._modelo = modelo
         self._tool = {
             "type": "function",
