@@ -311,9 +311,40 @@ de tocar `src/scoring.py`, no repetir el razonamiento aquí.
 - [x] **Fase 4** — Scoring persistido (`lead_scores`) + asignación a asesores
       (`asignaciones`) corriendo contra el dataset completo: 1.308 leads scoreados (21
       CALIENTE / 143 TIBIO / 1.144 FRÍO), 688 asignados, 620 exceden capacidad diaria
-- [ ] **Fase 5** — Automatización end-to-end
+- [x] **Fase 5** — Automatización: `.github/workflows/pipeline.yml` corre
+      `python pipeline.py` completo con un solo trigger (cron diario + `workflow_dispatch`
+      manual). Pendiente de un Postgres hospedado real (`DATABASE_URL` como secret) para
+      que la corrida en GitHub Actions funcione de punta a punta — ver detalle abajo.
 - [ ] **Fase 6** — Publicación (tablero)
 - [ ] **Fase 7** — Documentación y entregables
+
+## Fase 5 — automatización end-to-end (detalle de implementación)
+
+- **Un solo trigger corre todo**: `.github/workflows/pipeline.yml` ejecuta
+  `python pipeline.py` (fases 1, 2, 4 en secuencia) vía `schedule` (cron diario) o
+  `workflow_dispatch` (botón manual en la pestaña Actions, útil para la sustentación).
+  El runner instala Ollama y descarga `llama3.1:8b` en cada corrida — como Fase 2 es
+  reanudable (solo procesa conversaciones sin fila en `enriquecimiento_conversacion`),
+  solo la primera corrida contra una base vacía toma horas; las siguientes son
+  incrementales. `timeout-minutes: 300` a propósito por esa primera corrida.
+- **Bug real encontrado validando contra Postgres de verdad** (no solo SQLite, que
+  nunca fue puesto a prueba con FK activas): el refresco completo de Fase 1 hacía
+  `DROP TABLE` sobre `conversaciones`/`leads`/etc., y Postgres lo rechazaba
+  (`DependentObjectsStillExist`) porque `enriquecimiento_conversacion`/`lead_scores`/
+  `asignaciones` tienen FK hacia esas tablas y Fase 1 nunca las toca. Como los ids son
+  deterministas desde los archivos crudos, el estado final siempre es consistente — el
+  problema era solo el chequeo de FK a mitad de transacción. Fix: esas FK ahora son
+  `DEFERRABLE INITIALLY DEFERRED` (se validan al `COMMIT`, no en cada sentencia), y
+  Fase 1 cambió de `DROP TABLE`+`CREATE TABLE` a `DELETE` dentro de la misma
+  transacción que repuebla los datos. Validado end-to-end con Postgres real en Docker
+  (`docker-compose.yml`, solo para desarrollo local): Fase 1 corrida dos veces seguidas
+  con `enriquecimiento_conversacion`/`lead_scores`/`asignaciones` ya poblados, sin
+  perder ni corromper esas filas.
+- **Pendiente para que la automatización corra de verdad**: un Postgres accesible
+  desde internet (Supabase u otro host administrado — el usuario decidió Docker local
+  por ahora, que sirve para desarrollo/validación de esquema pero no es alcanzable
+  desde un runner de GitHub Actions ni desde el tablero público de la Fase 6).
+  `DATABASE_URL` debe configurarse como secret del repo cuando ese Postgres exista.
 
 ## Reglas de trabajo
 
