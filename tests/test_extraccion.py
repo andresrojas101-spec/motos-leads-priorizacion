@@ -17,7 +17,7 @@ from sqlalchemy.pool import StaticPool
 from src import schema
 from src.calidad import ColectorMetricas
 from src.esquema_extraccion import ValidationError
-from src.extraccion import ejecutar_extraccion, procesar_conversacion
+from src.extraccion import CuotaAgotada, ejecutar_extraccion, procesar_conversacion
 from src.normalizadores import EmparejadorModelos
 
 RESPUESTA_VALIDA = {
@@ -168,6 +168,105 @@ def test_modelo_no_mencionado_no_bloquea_la_extraccion(emparejador):
     assert fila["extraccion_status"] == "OK"
     assert fila["sku_interes"] is None
     assert fila["intencion"] == "BAJA"
+
+
+def test_fallo_guarda_detalle_error_para_diagnostico(emparejador):
+    """Sin esto, un fallo masivo (ej. cuota de API agotada) solo se diagnostica
+    grepeando logs de la corrida en vez de consultar la base de datos."""
+    cliente = ClienteLLMFalso(lambda t, r: RESPUESTA_CON_ENUM_INVALIDO)
+
+    fila, _ = procesar_conversacion("CONV-1", "LD-1", "hola", cliente, emparejador)
+
+    assert fila["extraccion_status"] == "FALLO"
+    assert fila["detalle_error"] is not None
+    assert "forma_pago" in fila["detalle_error"] or "EFECTIVO_MAGICO" in fila["detalle_error"]
+
+
+# --------------------------------------------------------------------------------------
+# Cuota diaria agotada (TPD) - distinto de un 429 por minuto (TPM)
+# --------------------------------------------------------------------------------------
+
+# Mensaje real observado corriendo el batch completo contra Groq.
+ERROR_CUOTA_DIARIA = RuntimeError(
+    "Error code: 429 - {'error': {'message': 'Rate limit reached for model "
+    "`openai/gpt-oss-20b` ... on tokens per day (TPD): Limit 200000, Used 199474, "
+    "Requested 2006. Please try again in 10m39.36s.', 'type': 'tokens', "
+    "'code': 'rate_limit_exceeded'}}"
+)
+
+
+def test_cuota_agotada_no_reintenta_localmente(emparejador):
+    """Un 429 de TPD no se recupera en el backoff de 2s pensado para TPM: reintentar
+    solo quema el segundo intento contra la misma pared. Debe propagarse de inmediato."""
+    cliente = ClienteLLMFalso(lambda t, r: ERROR_CUOTA_DIARIA)
+
+    with pytest.raises(CuotaAgotada):
+        procesar_conversacion("CONV-1", "LD-1", "hola", cliente, emparejador)
+
+    assert cliente.llamadas == 1  # nunca llega al segundo intento
+
+
+def test_cuota_agotada_distingue_de_un_429_generico(emparejador):
+    """Un 429 sin 'tokens per day' (ej. TPM) sigue el camino normal de reintento,
+    no CuotaAgotada."""
+    respuestas = iter([RuntimeError("429 rate limit, tokens per minute (TPM) exceeded"), RESPUESTA_VALIDA])
+    cliente = ClienteLLMFalso(lambda t, r: next(respuestas))
+
+    fila, _ = procesar_conversacion("CONV-1", "LD-1", "hola", cliente, emparejador)
+
+    assert fila["extraccion_status"] == "REINTENTO_OK"
+
+
+def test_ejecutar_extraccion_detiene_el_batch_sin_marcar_fallo_las_restantes(conn):
+    """Propiedad central del fix: al toparse con la cuota diaria, las conversaciones que
+    no alcanzaron a intentarse (o que tambien la topan) deben quedar 'pendientes' (sin
+    fila), no 'FALLO' permanente -- para que la proxima corrida las recoja.
+
+    La cuota se agota a nivel de CUENTA, no de conversacion: cualquiera que sea la
+    primera en ejecutar tiene exito, y absolutamente todas las demas -- sea CONV-2,
+    CONV-3, o ambas, según cómo el hilo trabajador programe el orden real -- deben topar
+    la misma pared. Se modela así en vez de fijar un orden exacto: con max_workers=1 hay
+    una carrera real entre el hilo trabajador tomando la siguiente tarea de la cola y el
+    hilo principal detectando CuotaAgotada y pidiendo shutdown -- el "detener" es un
+    best-effort, no una garantia dura, y el test no debe asumir mas de lo que el diseño
+    promete.
+    """
+    conn.execute(
+        schema.conversaciones.insert(),
+        [
+            {"conversacion_id": f"CONV-{i}", "lead_id": f"LD-{i}", "lead_id_declarado": f"LD-{i}",
+             "empresa_id": "EMP-01", "canal": "WHATSAPP", "fecha_inicio": datetime(2026, 8, 1),
+             "num_mensajes": 1, "estado_vinculacion": "VINCULADA"}
+            for i in range(1, 4)
+        ],
+    )
+    conn.execute(
+        schema.mensajes.insert(),
+        [{"conversacion_id": f"CONV-{i}", "orden": 1, "emisor": "cliente", "hora": "10:00", "texto": "hola"}
+         for i in range(1, 4)],
+    )
+    conn.commit()
+
+    contador = {"n": 0}
+    lock = threading.Lock()
+
+    def respuesta_fn(t, r):
+        with lock:
+            contador["n"] += 1
+            n = contador["n"]
+        return RESPUESTA_VALIDA if n == 1 else ERROR_CUOTA_DIARIA
+
+    cliente = ClienteLLMFalso(respuesta_fn)
+    metricas = ColectorMetricas(run_id="test-cuota", fase="fase2")
+
+    ejecutar_extraccion(conn, cliente, metricas, max_workers=1, tamano_lote_commit=1)
+    conn.commit()
+
+    filas = conn.execute(select(schema.enriquecimiento_conversacion)).mappings().all()
+    assert len(filas) == 1
+    assert filas[0]["extraccion_status"] == "OK"
+    # Ninguna conversacion que topo la cuota debe quedar como FALLO permanente.
+    assert all(f["extraccion_status"] != "FALLO" for f in filas)
 
 
 # --------------------------------------------------------------------------------------

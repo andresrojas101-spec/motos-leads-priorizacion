@@ -41,6 +41,26 @@ MAX_INTENTOS = 2  # intento inicial + 1 reintento
 ESPERA_ENTRE_INTENTOS_SEGUNDOS = 2.0
 
 
+class CuotaAgotada(Exception):
+    """El proveedor de IA agotó su cuota de tokens por DÍA (no por minuto).
+
+    Descubierto corriendo el batch completo real (645 conversaciones): Groq tiene dos
+    límites independientes — por minuto (TPM, ya manejado con reintento+backoff) y por
+    día (TPD, 200.000 tokens en la capa gratuita al momento de este assessment). Un 429
+    de TPM se recupera en segundos; uno de TPD no — Groq reporta esperas de varios
+    minutos por request, y sigue fallando request tras request hasta que la ventana
+    libera cupo. Reintentar localmente (2s de espera) es inútil contra esto y, peor,
+    corriendo 645 conversaciones sin detectarlo marca CIENTOS de conversaciones válidas
+    como 'FALLO' permanente cuando en realidad nunca se les dio una oportunidad real de
+    extraerse — un problema de cupo de la cuenta, no de la conversación.
+    """
+
+
+def _es_cuota_agotada(exc: Exception) -> bool:
+    texto = str(exc).lower()
+    return "tokens per day" in texto or "(tpd)" in texto
+
+
 def cargar_emparejador_desde_db(conn: Connection) -> EmparejadorModelos:
     """Reconstruye el emparejador de modelos (R6) desde `catalogo_motos`.
 
@@ -82,7 +102,7 @@ def _transcripcion_de(conn: Connection, conversacion_id: str) -> str:
     return formatear_transcripcion(mensajes)
 
 
-def _fila_vacia(conversacion_id: str, lead_id: str, estado: str) -> dict:
+def _fila_vacia(conversacion_id: str, lead_id: str, estado: str, detalle_error: str | None = None) -> dict:
     return {
         "conversacion_id": conversacion_id,
         "lead_id": lead_id,
@@ -96,6 +116,7 @@ def _fila_vacia(conversacion_id: str, lead_id: str, estado: str) -> dict:
         "pidio_cotizacion": None,
         "confianza_global": None,
         "extraccion_status": estado,
+        "detalle_error": (detalle_error or "")[:2000] or None,
         "modelo_llm": MODELO_LLM,
         "fecha_extraccion": datetime.now(),
     }
@@ -125,6 +146,13 @@ def procesar_conversacion(
             validado = parsear_y_validar(crudo)
             resultado = validar_semantica(validado)
         except Exception as exc:  # noqa: BLE001 - un intento fallido no debe tumbar el batch
+            if _es_cuota_agotada(exc):
+                # No es un fallo de ESTA conversacion: no tiene sentido reintentarla ni
+                # marcarla FALLO (eso la sacaria para siempre de "pendientes" via
+                # _conversaciones_pendientes, aunque nunca tuvo una oportunidad real).
+                # Se propaga para que ejecutar_extraccion detenga el batch completo.
+                raise CuotaAgotada(str(exc)) from exc
+
             # Cubre tanto fallas de red/API (anthropic.APIError y similares) como fallas
             # de validacion (ValidationError, JSON mal formado): ambas se tratan igual,
             # como un intento perdido que dispara el reintento en R13.
@@ -147,7 +175,7 @@ def procesar_conversacion(
             "Conversacion %s sin extraccion valida tras %d intentos: %s",
             conversacion_id, MAX_INTENTOS, ultimo_error,
         )
-        return _fila_vacia(conversacion_id, lead_id, "FALLO"), False
+        return _fila_vacia(conversacion_id, lead_id, "FALLO", str(ultimo_error)), False
 
     modelo = emparejador.emparejar(datos.modelo_interes_texto)
 
@@ -164,6 +192,7 @@ def procesar_conversacion(
         "pidio_cotizacion": datos.pidio_cotizacion,
         "confianza_global": datos.confianza_global,
         "extraccion_status": estado,
+        "detalle_error": None,
         "modelo_llm": MODELO_LLM,
         "fecha_extraccion": datetime.now(),
     }
@@ -217,6 +246,8 @@ def ejecutar_extraccion(
             conn.commit()
             lote.clear()
 
+    cuota_agotada = False
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futuros = {
             pool.submit(
@@ -230,7 +261,25 @@ def ejecutar_extraccion(
             for p in pendientes
         }
         for i, futuro in enumerate(as_completed(futuros), start=1):
-            fila, descartado = futuro.result()
+            try:
+                fila, descartado = futuro.result()
+            except CuotaAgotada as exc:
+                # No se inserta fila para esta conversacion: debe seguir "pendiente"
+                # para la proxima corrida, no marcarse FALLO. Se detiene el batch por
+                # completo en la primera vez que ocurre -- seguir procesando el resto
+                # de futuros solo generaria la misma falla cientos de veces mas.
+                if not cuota_agotada:
+                    cuota_agotada = True
+                    log.error(
+                        "Cuota diaria de tokens agotada tras %d/%d conversaciones. "
+                        "Deteniendo el batch -- las conversaciones restantes quedan "
+                        "pendientes para la proxima corrida (reanudable por diseno). "
+                        "Detalle: %s",
+                        i - 1, len(futuros), exc,
+                    )
+                    pool.shutdown(wait=False, cancel_futures=True)
+                continue
+
             filas.append(fila)
             lote.append(fila)
             presupuestos_descartados += int(descartado)
@@ -244,6 +293,7 @@ def ejecutar_extraccion(
                 log.info("Extraccion: %d/%d conversaciones procesadas", i, len(futuros))
 
     volcar_lote()  # remanente que no alcanzo a completar un lote
+    metricas.registrar("extraccion", "detenido_por_cuota_agotada", int(cuota_agotada))
 
     conteo_estado = {"OK": 0, "REINTENTO_OK": 0, "FALLO": 0}
     confianzas = []

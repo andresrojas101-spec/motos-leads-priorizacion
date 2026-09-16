@@ -176,8 +176,8 @@ CREATE TABLE conversaciones (
 	FOREIGN KEY(lead_id) REFERENCES leads (lead_id), 
 	FOREIGN KEY(empresa_id) REFERENCES empresas (empresa_id)
 );
-CREATE INDEX ix_conversaciones_empresa_id ON conversaciones (empresa_id);
 CREATE INDEX ix_conversaciones_lead_id ON conversaciones (lead_id);
+CREATE INDEX ix_conversaciones_empresa_id ON conversaciones (empresa_id);
 
 CREATE TABLE lead_scores (
 	lead_id VARCHAR(20) NOT NULL, 
@@ -206,6 +206,7 @@ CREATE TABLE enriquecimiento_conversacion (
 	pidio_cotizacion BOOLEAN, 
 	confianza_global FLOAT, 
 	extraccion_status VARCHAR(15) NOT NULL, 
+	detalle_error TEXT, 
 	modelo_llm VARCHAR(40), 
 	fecha_extraccion TIMESTAMP WITHOUT TIME ZONE, 
 	PRIMARY KEY (conversacion_id), 

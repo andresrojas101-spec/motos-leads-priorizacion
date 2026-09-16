@@ -220,6 +220,9 @@ enriquecimiento_conversacion = Table(
     Column("confianza_global", Float),
     # OK | REINTENTO_OK | FALLO -> una falla degrada el lead, no bloquea el pipeline.
     Column("extraccion_status", String(15), nullable=False),
+    # Mensaje crudo del ultimo error cuando extraccion_status='FALLO'. Sin esto, un fallo
+    # masivo (ej. cuota de API agotada) solo se diagnostica grepeando logs de la corrida.
+    Column("detalle_error", Text),
     Column("modelo_llm", String(40)),
     Column("fecha_extraccion", DateTime),
 )
@@ -274,15 +277,36 @@ metricas_calidad = Table(
 )
 
 
-# Tablas de auditoría: sobreviven al refresco completo. Su valor está justamente en
-# poder comparar la calidad de los datos entre corridas ("¿hoy entraron más rechazos
-# que ayer?"), así que borrarlas en cada ejecución las haría inútiles.
+# Tablas de auditoría: sobreviven a cualquier refresco. Su valor está en poder comparar
+# la calidad de los datos entre corridas ("¿hoy entraron más rechazos que ayer?"), así
+# que borrarlas las haría inútiles.
 TABLAS_AUDITORIA = frozenset({"ejecuciones", "metricas_calidad"})
+
+# Tablas que pertenecen a la Fase 1 (ingesta/normalización/dedup) y se reconstruyen por
+# completo en cada corrida de esa fase. Deliberadamente NO incluye las tablas que pueblan
+# las fases 2-4 (`enriquecimiento_conversacion`, `lead_scores`, `asignaciones`): un
+# refresco de Fase 1 (p. ej. para traer leads nuevos) no debe destruir horas de trabajo
+# de extracción con IA ya persistido. Este bug real se descubrió y corrigió a mitad del
+# desarrollo, antes de que llegara a ejecutarse dos veces con datos de producción.
+#
+# Advertencia para producción en Postgres: `leads` tiene columnas referenciadas por FK
+# desde `conversaciones` y `enriquecimiento_conversacion` (que sobreviven al refresco).
+# SQLite no impone FKs por defecto, así que el DROP+CREATE funciona en desarrollo; en
+# Postgres, este mismo refresco fallaría por violación de integridad referencial. La
+# solución correcta a largo plazo es upsert incremental en vez de drop-and-recreate —
+# ver "Qué haría con más tiempo" en el README. Documentado, no resuelto: está fuera del
+# alcance de este fix puntual.
+TABLAS_FASE1 = frozenset(
+    {
+        "empresas", "puntos_venta", "asesores", "catalogo_motos", "catalogo_disponibilidad",
+        "personas", "leads", "leads_rechazados", "conversaciones", "mensajes", "historico_cierres",
+    }
+)
 
 
 def tablas_de_datos() -> list:
-    """Tablas que se reconstruyen en cada corrida, en orden seguro para el DROP."""
-    return [t for t in reversed(metadata.sorted_tables) if t.name not in TABLAS_AUDITORIA]
+    """Tablas que la Fase 1 reconstruye en cada corrida, en orden seguro para el DROP."""
+    return [t for t in reversed(metadata.sorted_tables) if t.name in TABLAS_FASE1]
 
 
 def emitir_ddl_postgres() -> str:
