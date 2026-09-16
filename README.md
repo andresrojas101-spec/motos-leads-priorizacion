@@ -43,12 +43,12 @@ después. Hoy, el 32 % de los leads no tiene registrado ningún primer contacto.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env          # completar ANTHROPIC_API_KEY para la Fase 2
+cp .env.example .env          # completar GROQ_API_KEY para la Fase 2 (gratis, sin tarjeta)
 
 python pipeline.py --fase 1               # ingesta + normalización + deduplicación
 python pipeline.py --fase 2 --limite 20   # extracción con IA — probar en una muestra primero
 python pipeline.py --fase 2               # extracción sobre las ~665 conversaciones vinculadas
-pytest -q                                 # 86 tests (normalizadores + extracción con IA)
+pytest -q                                 # 90 tests (normalizadores + extracción con IA)
 python -m src.schema                      # regenera db/schema.sql
 ```
 
@@ -56,10 +56,13 @@ El pipeline hace refresco completo en la Fase 1 (reconstruye el almacén desde
 `data/raw/` en cada corrida, por lo que es idempotente) y refresco incremental en la
 Fase 2 (solo procesa conversaciones sin extracción previa, por lo que es reanudable).
 
-**Nota sobre la Fase 2**: el código está completo y cubierto por 22 tests con un cliente
-LLM falso (no requiere red). La corrida real necesita una `ANTHROPIC_API_KEY` propia en
-`.env` — recomendado probar primero con `--limite 20` para validar costo y calidad antes
-de lanzar el lote completo.
+**Nota sobre la Fase 2**: el código está completo y cubierto por 26 tests con un cliente
+LLM falso (no requiere red). El proveedor de IA es intercambiable por variable de entorno
+(`PROVEEDOR_LLM`, ver `.env.example`): por defecto usa **Groq** (capa gratuita, sin
+tarjeta de crédito), con Anthropic disponible como alternativa si en algún momento se
+prioriza calidad de extracción sobre costo. La corrida real necesita una API key propia
+del proveedor elegido — recomendado probar primero con `--limite 20` para validar costo
+y calidad antes de lanzar el lote completo.
 
 ## Resultado de la Fase 1
 
@@ -141,6 +144,16 @@ está lo condena a no recibir atención nunca — que es exactamente el problema
 su motivo y su payload original. Las 12 conversaciones huérfanas se cargan marcadas como
 tales en vez de borrarse.
 
+**El proveedor de IA es Groq por defecto, no Anthropic, por una restricción de
+presupuesto real: este proyecto no tiene presupuesto asignado para APIs de pago.** Groq
+ofrece una capa gratuita sin tarjeta de crédito, suficiente para el volumen del dataset
+(~665 conversaciones). La decisión no comprometió la arquitectura: `ClienteLLM` se
+definió como un `Protocol` desde el primer commit de la Fase 2, así que soportar un
+segundo proveedor fue añadir una clase (`ClienteGroq`) y una fábrica
+(`construir_cliente_llm()`) que elige según `PROVEEDOR_LLM` — cero cambios en
+`extraccion.py` ni en los tests que ya existían. Anthropic queda disponible como
+alternativa si en el futuro se prioriza calidad de extracción sobre costo.
+
 **La extracción con IA responde por `tool_choice` forzado, nunca por texto libre.** Pedirle
 al modelo que "responda en JSON" en un prompt de texto es la forma menos confiable de
 sacar salida estructurada — el modelo puede envolverla en markdown, agregar prosa antes o
@@ -196,7 +209,7 @@ auditoría, en vez de reintentarse indefinidamente en silencio.
 │   ├── dedup.py                  R8 — identidad de persona
 │   ├── calidad.py                Reporte y métricas de calidad
 │   ├── esquema_extraccion.py     R13 — esquema Pydantic + validación semántica
-│   ├── llm_cliente.py            R13 — cliente Anthropic (tool-use forzado)
+│   ├── llm_cliente.py            R13 — clientes Groq/Anthropic (tool-use forzado)
 │   └── extraccion.py             R13 — orquestación: reintento, fallo, batch concurrente
 ├── db/schema.sql                 DDL PostgreSQL generado y versionado
 ├── docs/

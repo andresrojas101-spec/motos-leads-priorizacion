@@ -28,6 +28,7 @@ El enunciado completo está en `../Assessment-Analista-IA-Enunciado.pdf`.
 | Base de datos | SQLAlchemy Core + `DATABASE_URL` (SQLite local → Postgres/Supabase en prod) | Mismo código en dev y prod; desacopla el runner de ingesta del tablero |
 | Orquestación | GitHub Actions (cron + `workflow_dispatch`) | Un solo disparo corre todo; cumple "sin intervención manual" |
 | Publicación | Streamlit Cloud | Capa gratuita, Python de punta a punta, rápido de desplegar |
+| Proveedor LLM (Fase 2) | **Groq** por defecto (capa gratuita, sin tarjeta); Anthropic como alternativa | El proyecto no tiene presupuesto para APIs de pago (decisión del usuario). `ClienteLLM` es un `Protocol`, así que el cambio de proveedor no tocó `extraccion.py` ni sus tests — ver `PROVEEDOR_LLM` en `.env` |
 
 **La última palabra sobre prioridad siempre es del motor de reglas, nunca del LLM.**
 El LLM solo extrae atributos; el score los pondera de forma transparente.
@@ -101,43 +102,52 @@ pip install -r requirements.txt
 
 python -m src.schema              # regenera db/schema.sql (DDL PostgreSQL)
 python pipeline.py --fase 1       # ingesta + normalización + dedup
-python pipeline.py --fase 2       # extracción con IA (requiere ANTHROPIC_API_KEY en .env)
+python pipeline.py --fase 2       # extracción con IA (requiere GROQ_API_KEY en .env)
 python pipeline.py --fase 2 --limite 20   # prueba de costo/calidad sobre una muestra
 python pipeline.py                # pipeline completo (cuando estén todas las fases)
 
-pytest -q                         # 86 tests: normalizadores + esquema + orquestación de IA
+pytest -q                         # 90 tests: normalizadores + esquema + orquestación de IA
 ```
 
 Base de datos por defecto: `sqlite:///data/warehouse.db` (override con `DATABASE_URL`).
 
 ## Fase 2 — extracción con IA (detalle de implementación)
 
-- **Salida estructurada forzada**: `src/llm_cliente.py` usa `tool_choice` de la API de
-  Anthropic (nunca pide JSON en texto libre). El esquema del tool se genera desde el
-  mismo modelo Pydantic (`src/esquema_extraccion.py`) que valida la respuesta — una sola
-  fuente de verdad para lo que el LLM puede devolver.
+- **Proveedor: Groq por defecto, no Anthropic**. Restricción real de presupuesto — el
+  proyecto no paga por APIs. `GROQ_API_KEY` en `.env` (capa gratuita, sin tarjeta,
+  console.groq.com). `PROVEEDOR_LLM=anthropic` + `ANTHROPIC_API_KEY` sigue disponible como
+  alternativa si en algún momento se prioriza calidad sobre costo — es una variable de
+  entorno, no un cambio de código.
+- **Salida estructurada forzada**: `src/llm_cliente.py` fuerza tool-calling en ambos
+  proveedores (`tool_choice` en Anthropic, formato OpenAI-compatible en Groq), nunca pide
+  JSON en texto libre. El esquema del tool se genera desde el mismo modelo Pydantic
+  (`src/esquema_extraccion.py`) que valida la respuesta — una sola fuente de verdad.
 - **Dos puertas de validación**: esquema (Pydantic/enums) y semántica (rango plausible de
   `presupuesto_monto`). Ver regla **R13** en `docs/reglas-normalizacion.md`.
 - **1 reintento, no más**: el esquema es fijo y conocido, así que no hay nada que
   replanificar. Si el reintento también falla, `extraccion_status='FALLO'` y el pipeline
-  sigue — el lead queda priorizable sin enriquecimiento, nunca bloqueado.
+  sigue — el lead queda priorizable sin enriquecimiento, nunca bloqueado. Entre intento y
+  reintento hay una pausa corta (`ESPERA_ENTRE_INTENTOS_SEGUNDOS`) pensada para absorber
+  los 429 de límite de tasa de la capa gratuita, no solo fallas de formato.
 - **`ClienteLLM` es un Protocol**, no una clase concreta: la lógica de negocio
   (`src/extraccion.py`) se testea con `ClienteLLMFalso` (en `tests/test_extraccion.py`)
-  sin tocar la red ni necesitar una API key. `ClienteAnthropic` es la única pieza que
-  habla con la API real.
+  sin tocar la red ni necesitar una API key. `ClienteGroq` y `ClienteAnthropic` son las
+  únicas piezas que hablan con una API real; `construir_cliente_llm()` en
+  `llm_cliente.py` elige cuál instanciar según `PROVEEDOR_LLM`.
 - **Reanudable**: `_conversaciones_pendientes()` excluye las que ya tienen fila en
   `enriquecimiento_conversacion`, así que una corrida interrumpida se completa
   relanzando el mismo comando sin reprocesar (ni recobrar) lo ya hecho.
-- **Concurrencia**: `ThreadPoolExecutor` (I/O-bound) para las ~665 conversaciones
-  vinculadas; las escrituras a la base de datos ocurren después, en el hilo principal.
+- **Concurrencia conservadora**: `ThreadPoolExecutor` con `EXTRACCION_MAX_WORKERS=4` por
+  defecto (antes 8) para no disparar demasiados 429 contra el límite por minuto de la
+  capa gratuita de Groq. Ajustable por `.env` si el plan del usuario lo permite.
 - **El LLM nunca resuelve el SKU**: devuelve `modelo_interes_texto` en texto libre: el
   mismo `EmparejadorModelos` de la Fase 1 (R6) lo resuelve a `sku_interes`, reutilizando
   la cascada ya probada contra el catálogo en vez de confiar en que el LLM no alucine un
   SKU inexistente.
-- **Sin probar en vivo todavía**: no hay `ANTHROPIC_API_KEY` en este entorno de
-  desarrollo. El código está cubierto por 22 tests con un cliente falso, pero la corrida
-  real sobre las 665 conversaciones vinculadas (costo y calidad en producción) queda
-  pendiente de que el usuario configure su llave y ejecute
+- **Sin probar en vivo todavía**: no hay `GROQ_API_KEY` en este entorno de desarrollo. El
+  código está cubierto por 26 tests con un cliente falso, pero la corrida real sobre las
+  665 conversaciones vinculadas (calidad de extracción de un modelo abierto vs. uno
+  propietario) queda pendiente de que el usuario configure su llave y ejecute
   `python pipeline.py --fase 2 --limite 20` como prueba piloto antes del batch completo.
 
 ## Estado por fases
@@ -145,7 +155,7 @@ Base de datos por defecto: `sqlite:///data/warehouse.db` (override con `DATABASE
 - [x] **Fase 0** — Modelo de datos, reglas de negocio, scaffolding
 - [x] **Fase 1** — Ingesta + normalización + deduplicación
 - [x] **Fase 2** — Extracción con IA desde conversaciones (código completo y testeado;
-      pendiente de ejecución real con `ANTHROPIC_API_KEY` del usuario)
+      proveedor Groq por defecto; pendiente de ejecución real con `GROQ_API_KEY` del usuario)
 - [ ] **Fase 3** — Scoring y priorización (validado contra histórico)
 - [ ] **Fase 4** — Persistencia final + asignación a asesores
 - [ ] **Fase 5** — Automatización end-to-end
