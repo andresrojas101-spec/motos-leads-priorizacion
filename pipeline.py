@@ -5,6 +5,7 @@ Un solo disparo ejecuta el flujo completo, sin pasos manuales:
     python pipeline.py --fase 1              # ingesta + normalizacion + deduplicacion
     python pipeline.py --fase 2               # extraccion con IA desde conversaciones
     python pipeline.py --fase 2 --limite 20   # prueba de costo/calidad sobre una muestra
+    python pipeline.py --fase 4               # scoring + asignacion a asesores
     python pipeline.py                        # todas las fases disponibles
 """
 
@@ -17,6 +18,12 @@ from datetime import datetime
 from sqlalchemy import create_engine
 
 from src import schema
+from src.asignacion import (
+    asignar_leads,
+    calcular_scores,
+    persistir_asignaciones,
+    persistir_scores,
+)
 from src.calidad import ColectorMetricas
 from src.config import DATABASE_URL, MODELO_LLM, PROVEEDOR_LLM, configurar_logging
 from src.dedup import construir_personas, persistir_personas
@@ -108,7 +115,47 @@ def ejecutar_fase2(limite: int | None = None) -> ColectorMetricas:
     return metricas
 
 
-FASES = {1: ejecutar_fase1, 2: ejecutar_fase2}
+def ejecutar_fase4(fecha_referencia: datetime | None = None) -> ColectorMetricas:
+    """Fase 4 - Scoring (Fase 3) + asignacion a asesores.
+
+    Requiere que la Fase 1 haya corrido (leads/asesores) y, opcionalmente, la Fase 2
+    (leads sin enriquecimiento se scorean solo con urgencia — ver docs/scoring.md).
+
+    `fecha_referencia` fija el "ahora" contra el que se mide `horas_sin_avance`. Por
+    defecto es el momento real de la corrida (uso normal en producción, disparado a
+    diario). Se puede fijar a una fecha distinta para reconstruir cómo se habría visto
+    la bandeja de un asesor en un día concreto, o para correr una demo sobre datos
+    sintéticos ya congelados sin que todo salga FRÍO solo por la distancia entre la
+    fecha de esos leads y la fecha real de hoy.
+
+    Refresco completo de `lead_scores` en cada corrida: el score depende de cuanto
+    tiempo ha pasado desde el ultimo avance de cada lead, asi que es intrinsecamente un
+    calculo "para ahora", no algo que tenga sentido acumular historicamente fila a fila.
+    `asignaciones` en cambio solo reemplaza el dia de hoy, conservando el historial de
+    bandejas anteriores.
+    """
+    ahora = fecha_referencia or datetime.now()
+    run_id = f"fase4-{datetime.now():%Y%m%d-%H%M%S}"
+    metricas = ColectorMetricas(run_id=run_id, fase="fase4")
+    engine = create_engine(DATABASE_URL)
+
+    log.info("Iniciando %s (fecha_referencia=%s)", run_id, ahora.isoformat())
+
+    with engine.begin() as conn:
+        scores = calcular_scores(conn, metricas, ahora=ahora)
+        persistir_scores(conn, scores)
+
+        dia = ahora.date()
+        asignaciones = asignar_leads(conn, scores, metricas, fecha=dia)
+        persistir_asignaciones(conn, asignaciones, dia)
+
+        metricas.persistir(conn)
+
+    log.info("Fase 4 completada")
+    return metricas
+
+
+FASES = {1: ejecutar_fase1, 2: ejecutar_fase2, 4: ejecutar_fase4}
 
 
 def main() -> None:
@@ -126,13 +173,26 @@ def main() -> None:
         default=None,
         help="Solo Fase 2: procesa a lo sumo N conversaciones (prueba de costo/calidad).",
     )
+    parser.add_argument(
+        "--fecha-referencia",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD[THH:MM]",
+        help="Solo Fase 4: 'ahora' contra el que se mide urgencia. Por defecto, el momento real.",
+    )
     args = parser.parse_args()
 
     configurar_logging()
     fases = [args.fase] if args.fase else sorted(FASES)
+    fecha_referencia = datetime.fromisoformat(args.fecha_referencia) if args.fecha_referencia else None
 
     for numero in fases:
-        metricas = FASES[numero](limite=args.limite) if numero == 2 else FASES[numero]()
+        if numero == 2:
+            metricas = FASES[numero](limite=args.limite)
+        elif numero == 4:
+            metricas = FASES[numero](fecha_referencia=fecha_referencia)
+        else:
+            metricas = FASES[numero]()
         if not args.silencioso:
             metricas.imprimir_resumen()
 
