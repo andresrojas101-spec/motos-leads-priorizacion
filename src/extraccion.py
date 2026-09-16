@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 from datetime import datetime
 
 from sqlalchemy import Connection, select
@@ -201,6 +201,14 @@ def procesar_conversacion(
 
 TAMANO_LOTE_COMMIT = 25  # ~5 min de trabajo a 5 llamadas/min: poco que perder si algo falla
 
+# Techo de tiempo sin ver NINGUN avance antes de abandonar el resto del batch. Es la
+# garantia real contra un hang de horas, independiente de que el SDK del LLM o la red se
+# porten bien: no depende de que un timeout HTTP o un backoff interno esten bien
+# configurados, es la ultima linea de defensa de este propio codigo. 240s es generoso
+# -- cubre comodamente 2 intentos con reintentos y backoff normales para 2 workers -- pero
+# acotado: un hang real se detecta y se corta en minutos, no se descubre una hora despues.
+PLAZO_SIN_PROGRESO_SEGUNDOS = 240
+
 
 def ejecutar_extraccion(
     conn: Connection,
@@ -210,6 +218,7 @@ def ejecutar_extraccion(
     limite: int | None = None,
     max_workers: int = EXTRACCION_MAX_WORKERS,
     tamano_lote_commit: int = TAMANO_LOTE_COMMIT,
+    plazo_sin_progreso_segundos: float = PLAZO_SIN_PROGRESO_SEGUNDOS,
 ) -> None:
     """Punto de entrada de la Fase 2.
 
@@ -225,6 +234,12 @@ def ejecutar_extraccion(
     se hace `conn.commit()` de inmediato — el llamador (`pipeline.py`) debe usar
     `engine.connect()`, no `engine.begin()`, para que estos commits intermedios sean
     reales y no queden atrapados dentro de una única transacción de horas.
+
+    **Watchdog contra hangs silenciosos**: si ninguna conversación termina en
+    `PLAZO_SIN_PROGRESO_SEGUNDOS`, se asume que algo se colgó de verdad (encontrado en la
+    práctica: un proceso quedó vivo más de una hora sin producir ni una línea de log) y se
+    abandona el resto del batch en vez de esperar indefinidamente — reanudable, como
+    cualquier otra interrupción.
     """
     emparejador = cargar_emparejador_desde_db(conn)
     pendientes = _conversaciones_pendientes(conn, limite)
@@ -247,27 +262,59 @@ def ejecutar_extraccion(
             lote.clear()
 
     cuota_agotada = False
+    colgado = False
+    i = 0
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futuros = {
-            pool.submit(
-                procesar_conversacion,
-                p["conversacion_id"],
-                p["lead_id"],
-                transcripciones[p["conversacion_id"]],
-                cliente,
-                emparejador,
-            ): p["conversacion_id"]
-            for p in pendientes
-        }
-        for i, futuro in enumerate(as_completed(futuros), start=1):
+    # Deliberadamente SIN "with": Executor.__exit__ siempre llama shutdown(wait=True),
+    # sin importar que ya se haya llamado shutdown(wait=False) a mano adentro del bloque
+    # -- un hilo realmente colgado (bloqueado en I/O, no cancelable) haria que salir del
+    # "with" se quedara esperando lo mismo que el watchdog acaba de decidir no esperar.
+    # Se maneja el shutdown a mano al final, con wait=True solo en el camino feliz (ahi
+    # no cuesta nada: todos los futuros ya terminaron).
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    futuros = {
+        pool.submit(
+            procesar_conversacion,
+            p["conversacion_id"],
+            p["lead_id"],
+            transcripciones[p["conversacion_id"]],
+            cliente,
+            emparejador,
+        ): p["conversacion_id"]
+        for p in pendientes
+    }
+    restantes = set(futuros.keys())
+
+    while restantes:
+        # wait() con timeout, no as_completed(): as_completed() bloquea sin fecha
+        # limite esperando el siguiente resultado. Si algo se cuelga de verdad (red,
+        # DNS, cualquier causa que ni el timeout HTTP ni los reintentos del cliente
+        # lograron resolver -- ver detalle en llm_cliente.py), wait() devuelve un
+        # conjunto vacio de "listos" tras PLAZO_SIN_PROGRESO_SEGUNDOS en vez de
+        # quedarse esperando en silencio por horas, que es justo lo que paso una vez.
+        listos, restantes = wait(restantes, timeout=plazo_sin_progreso_segundos, return_when=FIRST_COMPLETED)
+
+        if not listos:
+            ids_colgados = sorted(futuros[f] for f in restantes)
+            log.error(
+                "Ninguna conversacion completo en %ds; %d parecen colgadas (%s%s). "
+                "Abandonando el resto del batch -- reanudable, quedan pendientes "
+                "para la proxima corrida.",
+                plazo_sin_progreso_segundos, len(ids_colgados),
+                ", ".join(ids_colgados[:5]), "..." if len(ids_colgados) > 5 else "",
+            )
+            colgado = True
+            break
+
+        for futuro in listos:
+            i += 1
             try:
                 fila, descartado = futuro.result()
             except CuotaAgotada as exc:
                 # No se inserta fila para esta conversacion: debe seguir "pendiente"
-                # para la proxima corrida, no marcarse FALLO. Se detiene el batch por
-                # completo en la primera vez que ocurre -- seguir procesando el resto
-                # de futuros solo generaria la misma falla cientos de veces mas.
+                # para la proxima corrida, no marcarse FALLO. Se detiene el batch
+                # completo en la primera vez que ocurre -- seguir intentando el
+                # resto solo generaria la misma falla cientos de veces mas.
                 if not cuota_agotada:
                     cuota_agotada = True
                     log.error(
@@ -277,7 +324,12 @@ def ejecutar_extraccion(
                         "Detalle: %s",
                         i - 1, len(futuros), exc,
                     )
-                    pool.shutdown(wait=False, cancel_futures=True)
+                continue
+            except CancelledError:
+                # Futuro cancelado por el shutdown(cancel_futures=True) de abajo:
+                # tampoco se inserta fila, mismo motivo. Sin este except, CancelledError
+                # se propagaria sin controlar y tumbaria toda la corrida con un
+                # traceback en vez de terminar de forma prolija.
                 continue
 
             filas.append(fila)
@@ -292,8 +344,17 @@ def ejecutar_extraccion(
             elif i % 50 == 0 or i == len(futuros):
                 log.info("Extraccion: %d/%d conversaciones procesadas", i, len(futuros))
 
+        if cuota_agotada:
+            break
+
+    # wait=False en los caminos de escape: un hilo colgado o cancelado no debe bloquear
+    # el retorno de esta funcion. En el camino feliz (nada colgado ni agotado) da igual
+    # -- todos los futuros ya terminaron, shutdown(wait=True) no espera nada extra.
+    pool.shutdown(wait=not (colgado or cuota_agotada), cancel_futures=True)
+
     volcar_lote()  # remanente que no alcanzo a completar un lote
     metricas.registrar("extraccion", "detenido_por_cuota_agotada", int(cuota_agotada))
+    metricas.registrar("extraccion", "detenido_por_hang", int(colgado))
 
     conteo_estado = {"OK": 0, "REINTENTO_OK": 0, "FALLO": 0}
     confianzas = []

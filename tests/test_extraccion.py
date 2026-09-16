@@ -8,6 +8,7 @@ Usa un ClienteLLM falso (`ClienteLLMFalso`) que implementa el mismo Protocol que
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime
 
 import pytest
@@ -351,6 +352,42 @@ def test_ejecutar_extraccion_es_reanudable(conn):
     assert cliente.llamadas == 1  # sigue en 1: no habia pendientes
 
 
+def test_watchdog_detiene_el_batch_si_nada_progresa(conn):
+    """Garantiza la propiedad real que motivo el fix: un hang de verdad (red, DNS,
+    cualquier causa -- se encontro en la practica un proceso vivo mas de una hora sin
+    producir ni una linea de log) no debe bloquear el batch indefinidamente. Si nada
+    completa dentro del plazo, se abandona la espera en vez de quedarse colgado."""
+    conn.execute(
+        schema.conversaciones.insert(),
+        [{"conversacion_id": "CONV-1", "lead_id": "LD-1", "lead_id_declarado": "LD-1",
+          "empresa_id": "EMP-01", "canal": "WHATSAPP", "fecha_inicio": datetime(2026, 8, 1),
+          "num_mensajes": 1, "estado_vinculacion": "VINCULADA"}],
+    )
+    conn.execute(
+        schema.mensajes.insert(),
+        [{"conversacion_id": "CONV-1", "orden": 1, "emisor": "cliente", "hora": "10:00", "texto": "hola"}],
+    )
+    conn.commit()
+
+    nunca = threading.Event()  # jamas se marca: simula un hang real que no cede
+
+    def respuesta_fn(t, r):
+        nunca.wait(timeout=5)  # bloquea muy por encima del plazo de watchdog de la prueba
+        return RESPUESTA_VALIDA
+
+    cliente = ClienteLLMFalso(respuesta_fn)
+    metricas = ColectorMetricas(run_id="test-hang", fase="fase2")
+
+    inicio = time.monotonic()
+    ejecutar_extraccion(conn, cliente, metricas, max_workers=1, plazo_sin_progreso_segundos=0.3)
+    duracion = time.monotonic() - inicio
+
+    assert duracion < 4.0  # el watchdog corto la espera; no se dejaron pasar los 5s del hang
+    filas = conn.execute(select(schema.enriquecimiento_conversacion)).mappings().all()
+    assert filas == []  # nada se marca FALLO: la conversacion sigue "pendiente"
+    assert any(m.metrica == "detenido_por_hang" and m.valor == 1 for m in metricas.metricas)
+
+
 def test_ejecutar_extraccion_respeta_el_limite(conn):
     conn.execute(
         schema.catalogo_motos.insert(),
@@ -424,7 +461,17 @@ def test_persistencia_incremental_sobrevive_a_un_fallo_a_mitad_de_camino(conn, m
 
     monkeypatch.setattr(EmparejadorModelos, "emparejar", emparejar_con_fallo_en_el_cuarto)
 
-    cliente = ClienteLLMFalso(lambda t, r: RESPUESTA_VALIDA)
+    def respuesta_con_pausa(t, r):
+        # Pausa pequena para que cada conversacion complete en su propia ronda de
+        # wait(): con max_workers=1 el orden de ejecucion ya es FIFO, pero sin este
+        # respiro el hilo trabajador puede adelantarse y dejar varias conversaciones
+        # listas a la vez en el mismo set() que devuelve wait() -- y un set no
+        # garantiza orden de iteracion. La pausa fuerza que cada ronda entregue
+        # exactamente una, haciendo el orden de commit tan determinista como antes.
+        time.sleep(0.02)
+        return RESPUESTA_VALIDA
+
+    cliente = ClienteLLMFalso(respuesta_con_pausa)
     metricas = ColectorMetricas(run_id="test-crash", fase="fase2")
 
     # max_workers=1 para que el orden de procesamiento sea determinista (submission order).
