@@ -52,7 +52,13 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 _MODELO_POR_DEFECTO = {
-    "groq": "openai/gpt-oss-20b",
+    # gpt-oss-120b, no -20b: en pruebas reales contra el dataset completo, -120b dio
+    # igual o mejor calidad (confianza promedio 0.925 vs 0.876, 0 fallos de esquema) sin
+    # costo extra de velocidad (ambos comparten el mismo tope de 8.000 TPM en la capa
+    # gratuita). Ademas, al ser un modelo Groq distinto, tiene su propia cuota diaria
+    # (TPD) independiente de -20b -- si alguna vuelve a agotarse, cambiar MODELO_LLM en
+    # .env a la otra da un presupuesto fresco sin esperar el reinicio diario.
+    "groq": "openai/gpt-oss-120b",
     "anthropic": "claude-sonnet-5",
 }
 # El catálogo de modelos de Groq cambia con más frecuencia que el de Anthropic: si el
