@@ -340,11 +340,24 @@ de tocar `src/scoring.py`, no repetir el razonamiento aquí.
   (`docker-compose.yml`, solo para desarrollo local): Fase 1 corrida dos veces seguidas
   con `enriquecimiento_conversacion`/`lead_scores`/`asignaciones` ya poblados, sin
   perder ni corromper esas filas.
-- **Pendiente para que la automatización corra de verdad**: un Postgres accesible
-  desde internet (Supabase u otro host administrado — el usuario decidió Docker local
-  por ahora, que sirve para desarrollo/validación de esquema pero no es alcanzable
-  desde un runner de GitHub Actions ni desde el tablero público de la Fase 6).
-  `DATABASE_URL` debe configurarse como secret del repo cuando ese Postgres exista.
+- **Infraestructura real provisionada**: Postgres en Supabase (proyecto
+  `hrktcrxqwkthbxtimece`). La conexión "directa" (`db.<ref>.supabase.co`) resultó ser
+  solo IPv6 y falló por DNS en la red del usuario — se usa el *connection pooler*
+  (`aws-0-us-east-1.pooler.supabase.com:5432`, usuario `postgres.<ref>`) en su lugar.
+  Repositorio: **github.com/andresrojas101-spec/motos-leads-priorizacion** (público, sin
+  remoto hasta este punto — se creó y se hizo push del historial completo de 39+
+  commits vía `gh`). `DATABASE_URL` configurado como secret del repo.
+- **Supabase poblado con el dataset real completo**: schema aplicado
+  (`db/schema.sql`), Fase 1 corrida contra Supabase (1.500 leads, 677 conversaciones),
+  y las 665 filas de `enriquecimiento_conversacion` ya validadas en local se copiaron
+  directo (no se repitió la extracción de ~2h con Ollama, es determinista sobre las
+  mismas conversaciones). Fase 4 corrida ahí: mismos números que en local (1.308
+  scoreados, 21/143/1.144, 688 asignados) — confirma que Supabase y el SQLite local
+  quedaron consistentes.
+- **Workflow disparado manualmente para validar Actions de punta a punta**: con
+  Supabase ya poblado, Fase 2 no tiene conversaciones pendientes (reanudable), así que
+  esa corrida de verificación es rápida pese al costo fijo de instalar Ollama y bajar
+  el modelo en el runner.
 
 ## Reglas de trabajo
 
