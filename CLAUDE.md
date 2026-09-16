@@ -137,25 +137,56 @@ Base de datos por defecto: `sqlite:///data/warehouse.db` (override con `DATABASE
 - **Reanudable**: `_conversaciones_pendientes()` excluye las que ya tienen fila en
   `enriquecimiento_conversacion`, así que una corrida interrumpida se completa
   relanzando el mismo comando sin reprocesar (ni recobrar) lo ya hecho.
-- **Concurrencia conservadora**: `ThreadPoolExecutor` con `EXTRACCION_MAX_WORKERS=4` por
-  defecto (antes 8) para no disparar demasiados 429 contra el límite por minuto de la
-  capa gratuita de Groq. Ajustable por `.env` si el plan del usuario lo permite.
+- **Concurrencia conservadora**: `ThreadPoolExecutor` con `EXTRACCION_MAX_WORKERS=2` por
+  defecto. Verificado con piloto real, no es una suposición: el límite gratuito de Groq
+  para `openai/gpt-oss-20b` es **8.000 tokens/minuto a nivel de cuenta**, no por conexión,
+  y cada extracción consume ~1.200-1.900 tokens — el techo real es ~5 peticiones/minuto
+  sin importar cuántos workers corran. Más concurrencia solo generaba más 429
+  desperdiciados, no más throughput.
 - **El LLM nunca resuelve el SKU**: devuelve `modelo_interes_texto` en texto libre: el
   mismo `EmparejadorModelos` de la Fase 1 (R6) lo resuelve a `sku_interes`, reutilizando
   la cascada ya probada contra el catálogo en vez de confiar en que el LLM no alucine un
   SKU inexistente.
-- **Sin probar en vivo todavía**: no hay `GROQ_API_KEY` en este entorno de desarrollo. El
-  código está cubierto por 26 tests con un cliente falso, pero la corrida real sobre las
-  665 conversaciones vinculadas (calidad de extracción de un modelo abierto vs. uno
-  propietario) queda pendiente de que el usuario configure su llave y ejecute
-  `python pipeline.py --fase 2 --limite 20` como prueba piloto antes del batch completo.
+
+### Piloto real ejecutado (20 conversaciones, `openai/gpt-oss-20b` vía Groq)
+
+Dos bugs reales encontrados y corregidos en el camino (no hipotéticos — aparecieron al
+correr contra la API real, exactamente el tipo de cosa que un cliente falso no puede
+atrapar):
+
+1. **`llama-3.3-70b-versatile` (el modelo por defecto original) ya no existe** en el
+   catálogo de Groq — 404 en el 100% de los intentos. El catálogo de Groq cambia con
+   frecuencia; se corrigió el default a `openai/gpt-oss-20b` (verificado contra
+   `client.models.list()` con la key real) y se documentó en `.env.example` cómo
+   verificarlo si vuelve a pasar.
+2. **Bug propio en el prompt**: instruía "si no hay información, usa null" para *todos*
+   los campos, pero `intencion` y `objecion_principal` son enums obligatorios sin `null`
+   en el esquema. El modelo, siguiendo la instrucción contradictoria, inventaba valores
+   como `"INTERESADO"` (20/20 fallos de validación). Corregido enumerando los valores
+   válidos explícitamente en el prompt, generados desde los mismos enums de Pydantic.
+
+Resultado final tras ambos fixes: **19/20 exitosas** (18 al primer intento, 1 tras
+reintento), confianza promedio 0.876. Verificación cualitativa manual de 4 casos contra
+su transcripción original: parseo correcto de cifras coloquiales (`"2000mil"` →
+2.000.000, `"3000mil"` → 3.000.000) y seguimiento correcto de cambio de modelo dentro de
+la conversación. Un matiz de calibración detectado, no bloqueante: en una conversación de
+"solo estoy comparando" (patrón de baja intención identificado en la exploración inicial)
+el modelo clasificó `intencion=MEDIA` en vez de `BAJA` — vale la pena vigilar en el batch
+completo, no amerita rediseño.
+
+**Economía real de la capa gratuita**: al ritmo sostenible de ~5 peticiones/minuto, correr
+las ~665 conversaciones vinculadas toma aproximadamente **2 a 2.5 horas**, no minutos.
+Esto es información real para el diseño de la Fase 5 (automatización): el job en GitHub
+Actions necesita un timeout generoso, o el batch debe poder correr en background /
+reanudarse entre ejecuciones (ya lo soporta, por ser reanudable por diseño).
 
 ## Estado por fases
 
 - [x] **Fase 0** — Modelo de datos, reglas de negocio, scaffolding
 - [x] **Fase 1** — Ingesta + normalización + deduplicación
-- [x] **Fase 2** — Extracción con IA desde conversaciones (código completo y testeado;
-      proveedor Groq por defecto; pendiente de ejecución real con `GROQ_API_KEY` del usuario)
+- [x] **Fase 2** — Extracción con IA desde conversaciones (código completo, testeado, y
+      validado con piloto real contra Groq: 19/20 exitosas. Falta correr el batch completo
+      de ~665 conversaciones, estimado en 2-2.5h por el rate limit de la capa gratuita)
 - [ ] **Fase 3** — Scoring y priorización (validado contra histórico)
 - [ ] **Fase 4** — Persistencia final + asignación a asesores
 - [ ] **Fase 5** — Automatización end-to-end

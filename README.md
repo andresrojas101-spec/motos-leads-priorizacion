@@ -59,10 +59,15 @@ Fase 2 (solo procesa conversaciones sin extracción previa, por lo que es reanud
 **Nota sobre la Fase 2**: el código está completo y cubierto por 26 tests con un cliente
 LLM falso (no requiere red). El proveedor de IA es intercambiable por variable de entorno
 (`PROVEEDOR_LLM`, ver `.env.example`): por defecto usa **Groq** (capa gratuita, sin
-tarjeta de crédito), con Anthropic disponible como alternativa si en algún momento se
-prioriza calidad de extracción sobre costo. La corrida real necesita una API key propia
-del proveedor elegido — recomendado probar primero con `--limite 20` para validar costo
-y calidad antes de lanzar el lote completo.
+tarjeta de crédito) con el modelo `openai/gpt-oss-20b`, con Anthropic disponible como
+alternativa si en algún momento se prioriza calidad de extracción sobre costo.
+
+Piloto real ejecutado sobre 20 conversaciones: **19/20 exitosas** (confianza promedio
+0.876), tras corregir dos bugs reales que solo aparecieron contra la API real — ver
+"Decisiones tomadas" abajo. La capa gratuita limita a ~5 peticiones/minuto por cuenta
+(no por conexión), así que el lote completo de ~665 conversaciones toma **2-2.5 horas**
+en correr, no minutos — el proceso es reanudable por diseño, así que una interrupción no
+pierde el trabajo ya hecho.
 
 ## Resultado de la Fase 1
 
@@ -168,6 +173,24 @@ la inmensa mayoría de los casos; más allá de eso, el problema probablemente n
 formato sino de que la conversación es genuinamente ambigua, y seguir reintentando solo
 añade costo sin mejorar el resultado. La conversación queda marcada `FALLO` y visible para
 auditoría, en vez de reintentarse indefinidamente en silencio.
+
+**Dos bugs reales encontrados en el piloto contra la API real, corregidos antes del batch
+completo** — el motivo por el que se valida con datos reales y no solo con el cliente
+falso de los tests:
+
+1. El modelo Groq elegido inicialmente (`llama-3.3-70b-versatile`) ya no existía en su
+   catálogo — 404 en el 100% de los intentos. El catálogo de Groq cambia con frecuencia;
+   se corrigió a `openai/gpt-oss-20b`, verificado contra `client.models.list()`.
+2. El prompt tenía una instrucción contradictoria: decía "si no hay información, usa null"
+   para todos los campos, pero `intencion` y `objecion_principal` son enums obligatorios
+   sin `null` en el esquema (para eso existe `NINGUNA`/`BAJA`). El modelo, siguiendo esa
+   instrucción, inventaba valores como `"INTERESADO"` — 20/20 fallos de validación. Se
+   corrigió enumerando los valores válidos explícitamente en el prompt, generados desde
+   los mismos enums de Pydantic para que nunca se desincronicen del esquema real.
+
+Tras ambos fixes: 19/20 exitosas. También se descubrió el límite real de la capa gratuita
+(8.000 tokens/minuto por cuenta, no por conexión) y se bajó la concurrencia de 4 a 2
+workers en consecuencia — más workers solo generaban más 429, no más throughput.
 
 ## Supuestos asumidos
 
