@@ -85,7 +85,7 @@ def test_null_como_string_se_normaliza_a_none():
 
 
 def test_variantes_de_nulo_se_normalizan():
-    for variante in ["null", "NULL", "None", "nil", "  null  ", ""]:
+    for variante in ["null", "NULL", "None", "nil", "  null  ", "Nulo", ""]:
         datos = parsear_y_validar(dict(RESPUESTA_VALIDA, presupuesto_monto=variante))
         assert datos.presupuesto_monto is None, f"fallo con variante {variante!r}"
 
@@ -93,6 +93,14 @@ def test_variantes_de_nulo_se_normalizan():
 def test_booleano_como_string_se_normaliza():
     """Real: {'pidio_cita': 'true'} en vez de un booleano JSON."""
     datos = parsear_y_validar(dict(RESPUESTA_VALIDA, pidio_cita="true", pidio_cotizacion="false"))
+    assert datos.pidio_cita is True
+    assert datos.pidio_cotizacion is False
+
+
+def test_booleano_en_espanol_se_normaliza():
+    """Real: {'pidio_cita': 'falso'} -- llama3.1:8b respondio en espanol pese al prompt
+    en espanol pidiendo JSON con booleanos; capturado en el batch completo (CONV-00506)."""
+    datos = parsear_y_validar(dict(RESPUESTA_VALIDA, pidio_cita="verdadero", pidio_cotizacion="falso"))
     assert datos.pidio_cita is True
     assert datos.pidio_cotizacion is False
 

@@ -119,7 +119,7 @@ _CAMPOS_ENUM = frozenset({"forma_pago", "intencion", "objecion_principal"})
 _CAMPOS_BOOL = frozenset({"pidio_cita", "pidio_cotizacion"})
 # Variantes textuales de "sin valor" observadas en modelos locales (Ollama): en vez de
 # omitir la clave o escribir JSON null, escriben la palabra "null" como STRING.
-_NULOS_LITERALES = frozenset({"null", "none", "nil", "n/a", ""})
+_NULOS_LITERALES = frozenset({"null", "none", "nil", "n/a", "nulo", ""})
 
 
 def _normalizar_tipos_laxos(payload: dict) -> dict:
@@ -153,8 +153,8 @@ def _normalizar_tipos_laxos(payload: dict) -> dict:
         v = valor.strip()
         if v.lower() in _NULOS_LITERALES:
             limpio[clave] = None
-        elif clave in _CAMPOS_BOOL and v.lower() in ("true", "false"):
-            limpio[clave] = v.lower() == "true"
+        elif clave in _CAMPOS_BOOL and v.lower() in ("true", "false", "verdadero", "falso"):
+            limpio[clave] = v.lower() in ("true", "verdadero")
         elif clave == "presupuesto_monto" and v.lstrip("-").isdigit():
             limpio[clave] = int(v)
         elif clave == "confianza_global":
