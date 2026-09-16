@@ -28,7 +28,7 @@ El enunciado completo está en `../Assessment-Analista-IA-Enunciado.pdf`.
 | Base de datos | SQLAlchemy Core + `DATABASE_URL` (SQLite local → Postgres/Supabase en prod) | Mismo código en dev y prod; desacopla el runner de ingesta del tablero |
 | Orquestación | GitHub Actions (cron + `workflow_dispatch`) | Un solo disparo corre todo; cumple "sin intervención manual" |
 | Publicación | Streamlit Cloud | Capa gratuita, Python de punta a punta, rápido de desplegar |
-| Proveedor LLM (Fase 2) | **Groq** por defecto (capa gratuita, sin tarjeta); Anthropic como alternativa | El proyecto no tiene presupuesto para APIs de pago (decisión del usuario). `ClienteLLM` es un `Protocol`, así que el cambio de proveedor no tocó `extraccion.py` ni sus tests — ver `PROVEEDOR_LLM` en `.env` |
+| Proveedor LLM (Fase 2) | **Ollama local** (`llama3.1:8b`) por defecto; Groq y Anthropic quedan como alternativas documentadas | Groq (capa gratuita) tiene cuota diaria (TPD) insuficiente para el batch completo — decisión del usuario de migrar a un modelo local sin límite de cuota. `ClienteLLM` es un `Protocol`, así que el cambio de proveedor no tocó `extraccion.py` ni sus tests — ver `PROVEEDOR_LLM` en `.env` |
 
 **La última palabra sobre prioridad siempre es del motor de reglas, nunca del LLM.**
 El LLM solo extrae atributos; el score los pondera de forma transparente.
@@ -102,11 +102,12 @@ pip install -r requirements.txt
 
 python -m src.schema              # regenera db/schema.sql (DDL PostgreSQL)
 python pipeline.py --fase 1       # ingesta + normalización + dedup
-python pipeline.py --fase 2       # extracción con IA (requiere GROQ_API_KEY en .env)
+python pipeline.py --fase 2       # extracción con IA (requiere Ollama corriendo localmente, o PROVEEDOR_LLM=groq/anthropic + API key en .env)
 python pipeline.py --fase 2 --limite 20   # prueba de costo/calidad sobre una muestra
+python pipeline.py --fase 4       # scoring + asignación a asesores
 python pipeline.py                # pipeline completo (cuando estén todas las fases)
 
-pytest -q                         # 90 tests: normalizadores + esquema + orquestación de IA
+pytest -q                         # 152 tests: normalizadores + esquema + orquestación de IA + scoring/asignación
 ```
 
 Base de datos por defecto: `sqlite:///data/warehouse.db` (override con `DATABASE_URL`).
@@ -274,34 +275,42 @@ de tocar `src/scoring.py`, no repetir el razonamiento aquí.
   conservando el historial de bandejas de días anteriores.
 - **`--fecha-referencia` (CLI)**: fija el "ahora" contra el que se mide
   `horas_sin_avance`. Hallazgo real corriendo contra los datos reales: con la fecha real
-  de hoy (2026-09-15), el resultado es 24 CALIENTE / 20 TIBIO / 1.264 FRÍO — no es un
-  bug, es el reflejo honesto de que la mayoría del backlog de `leads.csv` (registrado en
-  agosto) ya lleva semanas sin contacto un mes después de "hoy". Con
-  `--fecha-referencia 2026-09-06` (más cerca de cuando esos leads eran nuevos de verdad)
-  el resultado sube a 154 CALIENTE / 26 TIBIO / 1.128 FRÍO — confirma que el flag
-  funciona y que el sesgo hacia FRÍO es sensible a la fecha, no un error de cálculo.
-- **Resultado real de asignación** (con "ahora" real): 688 de 1.308 leads asignados hoy,
-  **620 exceden la capacidad diaria combinada de su punto de venta** y quedan para
-  mañana — el propio pipeline hace visible, con números, el problema original del
-  gerente ("estamos recibiendo más leads de los que alcanzamos a gestionar").
-- 14 tests nuevos (135 en total): `distribuir_leads` cubierto con función pura (respeta
+  de hoy y el batch de Fase 2 completo (665/665), el resultado es 21 CALIENTE / 143
+  TIBIO / 1.144 FRÍO — no es un bug, es el reflejo honesto de que la mayoría del backlog
+  de `leads.csv` (registrado en agosto) ya lleva semanas sin contacto un mes después de
+  "hoy". Con `--fecha-referencia 2026-09-06` (más cerca de cuando esos leads eran nuevos
+  de verdad) el balde CALIENTE sube considerablemente — confirma que el flag funciona y
+  que el sesgo hacia FRÍO es sensible a la fecha, no un error de cálculo.
+- **Resultado real de asignación** (con "ahora" real, batch de Fase 2 completo): 688 de
+  1.308 leads asignados hoy, **620 exceden la capacidad diaria combinada de su punto de
+  venta** y quedan para mañana — el propio pipeline hace visible, con números, el
+  problema original del gerente ("estamos recibiendo más leads de los que alcanzamos a
+  gestionar").
+- **Bug real encontrado y corregido al correr Fase 4 contra el dataset completo**: 25
+  leads tienen más de una conversación vinculada (el cliente escribió más de una vez);
+  el join en `_leads_activos` producía una fila por conversación en vez de una por lead,
+  y `persistir_scores` rompía con `UNIQUE constraint failed: lead_scores.lead_id`. Se
+  deduplica quedándose con la conversación de `fecha_inicio` más reciente por lead.
+- 15 tests nuevos (152 en total): `distribuir_leads` cubierto con función pura (respeta
   capacidad, reparte proporcional sin volcar todo al primer asesor, orden determinista,
   casos borde sin asesores/sin leads); integración con DB en memoria para exclusión de
-  descartados/secundarios, tenancy, tope diario, y refresco parcial vs. completo.
+  descartados/secundarios, tenancy, tope diario, refresco parcial vs. completo, y
+  deduplicación de leads con múltiples conversaciones.
 
 ## Estado por fases
 
 - [x] **Fase 0** — Modelo de datos, reglas de negocio, scaffolding
 - [x] **Fase 1** — Ingesta + normalización + deduplicación
-- [x] **Fase 2** — Extracción con IA desde conversaciones (código completo, testeado, y
-      validado con piloto real contra Groq: 19/20 exitosas, más el fix de persistencia
-      incremental y el fix de cuota diaria. Batch completo (~665 conversaciones) sigue
-      pendiente de terminar de correr — bloqueado por la cuota diaria de la capa gratuita)
+- [x] **Fase 2** — Extracción con IA desde conversaciones. Migrada de Groq (capa
+      gratuita, cuota diaria insuficiente) a **Ollama local** (`llama3.1:8b`) como
+      proveedor por defecto — ver decisión de arquitectura arriba. Batch completo
+      corrido contra las 665 conversaciones vinculadas: 550 OK al primer intento, 42
+      OK tras reintento, 32 fallo definitivo (R13) — 89% con datos utilizables.
 - [x] **Fase 3** — Scoring y priorización: motor implementado, validado contra histórico
       (lift 2.89x CALIENTE/FRÍO). **CP2 aprobado por el usuario**
 - [x] **Fase 4** — Scoring persistido (`lead_scores`) + asignación a asesores
-      (`asignaciones`) corriendo contra datos reales: 1.308 leads scoreados, 688
-      asignados, 620 exceden capacidad diaria
+      (`asignaciones`) corriendo contra el dataset completo: 1.308 leads scoreados (21
+      CALIENTE / 143 TIBIO / 1.144 FRÍO), 688 asignados, 620 exceden capacidad diaria
 - [ ] **Fase 5** — Automatización end-to-end
 - [ ] **Fase 6** — Publicación (tablero)
 - [ ] **Fase 7** — Documentación y entregables
