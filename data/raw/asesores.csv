@@ -1,0 +1,43 @@
+asesor_id,nombre,punto_venta_id,empresa_id,capacidad_diaria_leads,activo,fecha_ingreso
+AS-001,Édinson Mosquera Pérez,PV-001,EMP-01,12,SI,2026-02-27
+AS-002,Andrés Felipe Bedoya Salazar,PV-001,EMP-01,25,SI,2025-02-10
+AS-003,Sebastián Mosquera Rodríguez,PV-001,EMP-01,20,SI,2024-02-24
+AS-004,Sebastián Cardona Londoño,PV-001,EMP-01,20,SI,2024-01-18
+AS-005,Luisa Ospina Vargas,PV-002,EMP-01,18,SI,2024-03-08
+AS-006,Duván Ramírez Londoño,PV-002,EMP-01,15,SI,2024-03-24
+AS-007,Leidy Johana Herrera Castaño,PV-002,EMP-01,18,SI,2025-08-06
+AS-008,Cristian Franco Zapata,PV-002,EMP-01,12,SI,2025-04-27
+AS-009,Liliana Muñoz Zapata,PV-003,EMP-01,18,SI,2025-06-28
+AS-010,Paula Andrea Londoño Cardona,PV-003,EMP-01,18,SI,2024-04-27
+AS-011,Sebastián Valencia Cardona,PV-003,EMP-01,12,SI,2025-11-28
+AS-012,Julián Osorio Mosquera,PV-003,EMP-01,18,SI,2025-10-18
+AS-013,Liliana Londoño Bedoya,PV-004,EMP-01,12,SI,2024-04-22
+AS-014,Luz Marina Cardona Mosquera,PV-004,EMP-01,20,SI,2024-10-26
+AS-015,Katherine Vargas Jiménez,PV-005,EMP-01,25,SI,2026-04-27
+AS-016,Leidy Johana Castaño Jiménez,PV-005,EMP-01,15,SI,2026-03-28
+AS-017,Julián Zapata Ramírez,PV-006,EMP-02,15,SI,2025-09-25
+AS-018,Erika Muñoz Vargas,PV-006,EMP-02,20,SI,2024-02-01
+AS-019,Alexander Vargas Restrepo,PV-007,EMP-02,12,SI,2024-06-15
+AS-020,Yesenia Salazar Muñoz,PV-007,EMP-02,12,SI,2026-01-27
+AS-021,Nelson Correa Correa,PV-008,EMP-02,20,SI,2026-02-21
+AS-022,Jhon Jairo Vargas Quintero,PV-008,EMP-02,20,SI,2024-06-20
+AS-023,Nelson Vargas Giraldo,PV-008,EMP-02,20,SI,2025-01-17
+AS-024,Sandra Milena Betancur Giraldo,PV-009,EMP-02,20,SI,2024-06-24
+AS-025,Wilmar Quintero Vargas,PV-009,EMP-02,20,SI,2025-04-21
+AS-026,Kevin Cardona Herrera,PV-009,EMP-02,15,SI,2024-01-05
+AS-027,Claudia Patricia Salazar Torres,PV-010,EMP-02,12,SI,2024-10-24
+AS-028,Yuliana Arias Pérez,PV-010,EMP-02,15,SI,2026-04-30
+AS-029,Leidy Johana Pérez Torres,PV-011,EMP-03,15,SI,2024-07-08
+AS-030,María Fernanda Restrepo Gómez,PV-011,EMP-03,15,SI,2025-04-11
+AS-031,Paula Andrea Castaño Correa,PV-011,EMP-03,15,SI,2025-03-10
+AS-032,Sandra Milena Salazar Franco,PV-011,EMP-03,15,SI,2025-12-29
+AS-033,Natalia Rodríguez Arias,PV-012,EMP-03,25,SI,2026-06-01
+AS-034,Yuliana Muñoz Marín,PV-012,EMP-03,18,SI,2025-11-08
+AS-035,Cristian Gómez Zapata,PV-012,EMP-03,25,SI,2024-03-20
+AS-036,Julián Arias Osorio,PV-012,EMP-03,18,SI,2024-08-12
+AS-037,Luisa Muñoz Escobar,PV-013,EMP-03,15,NO,2025-12-05
+AS-038,Luz Marina Hernández Restrepo,PV-013,EMP-03,12,SI,2024-03-09
+AS-039,Édinson Ospina Arias,PV-014,EMP-03,20,SI,2025-06-13
+AS-040,Marcela Hernández Rodríguez,PV-014,EMP-03,18,NO,2025-04-19
+AS-041,Estefanía Escobar Mosquera,PV-015,EMP-03,25,SI,2026-05-08
+AS-042,Adriana Escobar Giraldo,PV-015,EMP-03,12,SI,2024-11-12

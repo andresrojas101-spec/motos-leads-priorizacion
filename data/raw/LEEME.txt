@@ -1,0 +1,15 @@
+ASSESSMENT TECNICO - ANALISTA DE IA
+Motos y Servicios de Colombia S.A.S. - Gerencia de IA y Transformacion
+
+Archivos de este paquete:
+
+  leads.csv              1.503 filas  - Leads de los tres canales
+  conversaciones.json      677 convs  - Transcripciones de WhatsApp
+  catalogo_motos.csv        24 filas  - Catalogo de producto y disponibilidad
+  asesores.csv              42 filas  - Asesores por punto de venta
+  historico_cierres.csv  2.200 filas  - Leads historicos con su desenlace real
+
+Los datos son sinteticos y no corresponden a clientes reales.
+Contienen inconsistencias deliberadas: detectarlas hace parte del ejercicio.
+
+Codificacion: UTF-8. Separador CSV: coma. Salto de linea: CRLF.
