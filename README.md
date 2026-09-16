@@ -32,8 +32,8 @@ después. Hoy, el 32 % de los leads no tiene registrado ningún primer contacto.
 |---|---|---|
 | 0 | Modelo de datos, reglas de negocio, scaffolding | ✅ |
 | 1 | Ingesta + normalización + deduplicación | ✅ |
-| 2 | Extracción con IA desde conversaciones | ✅ (código listo; falta la corrida real — ver abajo) |
-| 3 | Scoring y priorización validados contra el histórico | ⏳ |
+| 2 | Extracción con IA desde conversaciones | ✅ (validado en piloto real; batch completo corriendo) |
+| 3 | Scoring y priorización validados contra el histórico | ✅ (lift 2.89x validado; CP2 pendiente de aprobación) |
 | 4 | Persistencia final + asignación a asesores | ⏳ |
 | 5 | Automatización end-to-end | ⏳ |
 | 6 | Publicación (tablero) | ⏳ |
@@ -98,11 +98,41 @@ data/raw/*.csv,json
   Extracción LLM (tool-use forzado) ──► validación ──► reintento (1x) ──► fallo controlado   [Fase 2 ✅]
         │
         ▼
-  Scorecard de reglas ponderadas, calibrado con historico_cierres   [Fase 3]
+  Scorecard de reglas ponderadas, calibrado con historico_cierres   [Fase 3 ✅]
         │
         ▼
   Base de datos  ──►  Tablero "mis leads de hoy" filtrado por empresa   [Fases 4-6]
 ```
+
+### Fase 3 — scoring: metodología y validación
+
+Scorecard de *weight of evidence* (log-odds vs. tasa base), la técnica clásica de credit
+scoring — no un modelo entrenado. Metodología completa, tablas de evidencia y la
+justificación de cada peso en [`docs/scoring.md`](docs/scoring.md).
+
+- **Urgencia domina el score (45% del peso)**: horas desde el último avance real del lead
+  (contacto si existe, si no el registro). Único componente siempre disponible.
+- **Componentes secundarios validados** (forma de pago, cuota inicial, pidió cita) suman
+  35% del peso — señal real pero débil, medida y documentada con su intervalo de
+  confianza aproximado, no solo con el punto estimado.
+- **Componentes de IA (20%)**: `intencion`/`objecion_principal` de la Fase 2 no tienen
+  histórico equivalente — pesos razonados, no medidos, explícitamente marcados como
+  supuesto a recalibrar con datos reales de esta app en producción.
+- **Canal se midió y se descartó**: todas las tasas por canal caen dentro de ±1pp de la
+  base — ruido, no señal. No entra a la fórmula.
+- **Validación retro-activa** sobre los 2.021 leads gestionados del histórico
+  (`python -m src.validar_scoring`):
+
+| Temperatura | n | Tasa de cierre real |
+|---|---|---|
+| CALIENTE (score ≥65) | 467 | **16.06%** |
+| TIBIO (40-64) | 942 | 9.34% |
+| FRÍO (<40) | 612 | **5.56%** |
+
+**Lift CALIENTE vs. FRÍO: 2.89x** — supera el 2.6x que ya daba la urgencia sola: los
+componentes secundarios suman señal real. `src/scoring.py` existe y está validado, pero
+aún no está conectado a `leads` ni a la base de datos — es a propósito el checkpoint que
+el plan original marcó para revisar antes de persistir a producción (Fase 4).
 
 ### Por qué no una arquitectura multi-agente
 

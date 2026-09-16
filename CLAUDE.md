@@ -180,14 +180,65 @@ Esto es información real para el diseño de la Fase 5 (automatización): el job
 Actions necesita un timeout generoso, o el batch debe poder correr en background /
 reanudarse entre ejecuciones (ya lo soporta, por ser reanudable por diseño).
 
+**Persistencia incremental (fix posterior)**: el batch original no escribía nada hasta
+terminar las 645 conversaciones restantes — cualquier interrupción en esas ~2h perdía
+todo. `ejecutar_extraccion` ahora hace `INSERT` + `commit()` cada `TAMANO_LOTE_COMMIT=25`
+conversaciones; `pipeline.py` usa `engine.connect()` en vez de `engine.begin()` para Fase
+2 específicamente (Fase 1 conserva `.begin()` a propósito: ahí la atomicidad del refresco
+completo sí es una feature). Test que prueba la propiedad real (no solo el mecanismo):
+simula un fallo externo a mitad de un batch y verifica que el lote ya commiteado
+sobrevive.
+
+## Fase 3 — scoring y priorización (detalle de implementación)
+
+Metodología completa, tablas de evidencia y validación en `docs/scoring.md` — léelo antes
+de tocar `src/scoring.py`, no repetir el razonamiento aquí.
+
+- **Técnica**: scorecard de *weight of evidence* (log-odds vs. tasa base), la misma
+  técnica de credit scoring de décadas de uso — no un modelo entrenado. El enunciado lo
+  permite explícitamente y es muchísimo más explicable en una sustentación de 10 minutos.
+- **Componente dominante (45% del peso): urgencia** — horas desde el último avance real
+  (`fecha_primer_contacto` si existe, si no `fecha_registro`). Único componente que
+  **siempre** está disponible (toda fila tiene fecha de registro); el resto depende de
+  tener conversación enriquecida.
+- **Renormalización dinámica**: si falta un componente (56% de los leads no tienen
+  conversación vinculada), se excluye del cálculo y los pesos restantes se renormalizan a
+  1.0 — nunca se imputa un valor neutro fingiendo tener información que no existe. Sin
+  enriquecimiento, el score es 100% urgencia.
+- **Canal se midió y se descartó** — todas las tasas de cierre por canal caen dentro de
+  ±1pp de la base, estadísticamente indistinguible de ruido. No entra a la fórmula.
+  Ejemplo deliberado de "criterio" que pide el enunciado: no todo lo medido merece peso.
+- **Decisión de criterio sobre dato contraintuitivo**: `forma_pago=no_informa` tiene la
+  tasa de cierre MÁS ALTA en el histórico (12.28%, por encima de `contado` con 11.82%).
+  Se decidió NO premiarlo — es contraintuitivo y estadísticamente ruidoso (muestra chica,
+  sin explicación de negocio plausible) — en vez de seguir el dato crudo a ciegas.
+- **Componentes de IA (20% del peso, Grupo B)**: `intencion`/`objecion_principal` de la
+  Fase 2 no existen en `historico_cierres.csv` — no hay forma de validarlos
+  empíricamente. Pesos razonados, no medidos, explícitamente documentados como supuesto a
+  recalibrar cuando existan desenlaces reales.
+- **Degradación por confianza**: los sub-scores de IA se acercan al punto neutral (50) en
+  proporción a `confianza_global` del LLM — una extracción de confianza 0.3 pesa mucho
+  menos que una de 1.0, sin llegar a anularse del todo.
+- **Validación retro-activa** (`python -m src.validar_scoring`, sobre los 2.021 leads
+  gestionados del histórico): **CALIENTE cierra 16.06%, TIBIO 9.34%, FRÍO 5.56% — lift de
+  2.89x**, superando el 2.6x que ya daba la urgencia sola. Confirma que los componentes
+  secundarios suman señal real. Cortes de temperatura (65/40) sin ajustar: el resultado
+  en 3 baldes ya salió monotónico.
+- **Aún no integrado a producción**: `src/scoring.py` existe y está validado, pero no se
+  ha conectado a `leads` ni a la tabla `lead_scores` — eso es Fase 4 (CP2 del plan
+  original: revisar la lógica de scoring antes de persistirla). Pendiente de aprobación
+  del usuario antes de avanzar.
+
 ## Estado por fases
 
 - [x] **Fase 0** — Modelo de datos, reglas de negocio, scaffolding
 - [x] **Fase 1** — Ingesta + normalización + deduplicación
 - [x] **Fase 2** — Extracción con IA desde conversaciones (código completo, testeado, y
-      validado con piloto real contra Groq: 19/20 exitosas. Falta correr el batch completo
-      de ~665 conversaciones, estimado en 2-2.5h por el rate limit de la capa gratuita)
-- [ ] **Fase 3** — Scoring y priorización (validado contra histórico)
+      validado con piloto real contra Groq: 19/20 exitosas, más el fix de persistencia
+      incremental. Batch completo de ~665 conversaciones corriendo en background)
+- [x] **Fase 3** — Scoring y priorización: motor implementado, validado contra histórico
+      (lift 2.89x CALIENTE/FRÍO). **CP2 pendiente de aprobación del usuario** antes de
+      persistir a producción (Fase 4)
 - [ ] **Fase 4** — Persistencia final + asignación a asesores
 - [ ] **Fase 5** — Automatización end-to-end
 - [ ] **Fase 6** — Publicación (tablero)
