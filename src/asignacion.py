@@ -43,6 +43,13 @@ def _leads_activos(conn: Connection) -> list[dict]:
 
     Un lead secundario (`es_lead_canonico=False`, ver R8) representa a la misma persona
     que su canónico — incluirlo también duplicaría al cliente en la lista del asesor.
+
+    Un lead puede tener más de una conversación vinculada (25 casos reales: el cliente
+    escribió por WhatsApp más de una vez). El join contra `enriquecimiento_conversacion`
+    produce una fila por conversación, así que tras traer los datos nos quedamos con una
+    sola fila por `lead_id`: la de la conversación con `fecha_inicio` más reciente — el
+    mismo criterio de "último avance real" que ya usa el componente de urgencia — para
+    que el score refleje el estado más actual del cliente, no una mezcla arbitraria.
     """
     consulta = (
         select(
@@ -59,17 +66,31 @@ def _leads_activos(conn: Connection) -> list[dict]:
             schema.enriquecimiento_conversacion.c.presupuesto_monto,
             schema.enriquecimiento_conversacion.c.confianza_global,
             schema.enriquecimiento_conversacion.c.extraccion_status,
+            schema.conversaciones.c.fecha_inicio,
         )
         .select_from(
             schema.leads.outerjoin(
                 schema.enriquecimiento_conversacion,
                 schema.leads.c.lead_id == schema.enriquecimiento_conversacion.c.lead_id,
+            ).outerjoin(
+                schema.conversaciones,
+                schema.enriquecimiento_conversacion.c.conversacion_id
+                == schema.conversaciones.c.conversacion_id,
             )
         )
         .where(schema.leads.c.es_lead_canonico.is_(True))
         .where(schema.leads.c.estado_gestion.notin_(ESTADOS_EXCLUIDOS_DE_ASIGNACION))
     )
-    return [dict(f) for f in conn.execute(consulta).mappings()]
+    filas = [dict(f) for f in conn.execute(consulta).mappings()]
+
+    mas_reciente_por_lead: dict[str, dict] = {}
+    for fila in filas:
+        actual = mas_reciente_por_lead.get(fila["lead_id"])
+        if actual is None or (fila["fecha_inicio"] or datetime.min) > (
+            actual["fecha_inicio"] or datetime.min
+        ):
+            mas_reciente_por_lead[fila["lead_id"]] = fila
+    return list(mas_reciente_por_lead.values())
 
 
 def _entrada_desde_lead(fila: dict, ahora: datetime) -> EntradaScore:

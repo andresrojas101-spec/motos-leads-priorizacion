@@ -220,6 +220,50 @@ def test_calcular_scores_lead_viejo_sin_enriquecimiento_es_frio(conn):
     assert por_id["LD-2"]["temperatura"] == "FRIO"
 
 
+def test_calcular_scores_lead_con_dos_conversaciones_no_se_duplica(conn):
+    """Real: 25 leads del dataset completo tienen mas de una conversacion vinculada (el
+    cliente escribio por WhatsApp mas de una vez). El join contra
+    enriquecimiento_conversacion produce una fila por conversacion -- sin deduplicar,
+    persistir_scores rompia con UNIQUE constraint sobre lead_id. Debe quedar exactamente
+    una fila de score por lead, tomando la conversacion con fecha_inicio mas reciente."""
+    _poblar_base(conn, con_enriquecimiento=False)
+    conn.execute(
+        schema.conversaciones.insert(),
+        [
+            {"conversacion_id": "CONV-1", "lead_id": "LD-1", "lead_id_declarado": "LD-1",
+             "empresa_id": "EMP-01", "canal": "WHATSAPP", "fecha_inicio": datetime(2026, 9, 10, 9, 0),
+             "num_mensajes": 2, "estado_vinculacion": "VINCULADA"},
+            {"conversacion_id": "CONV-2", "lead_id": "LD-1", "lead_id_declarado": "LD-1",
+             "empresa_id": "EMP-01", "canal": "WHATSAPP", "fecha_inicio": datetime(2026, 9, 15, 9, 0),
+             "num_mensajes": 3, "estado_vinculacion": "VINCULADA"},
+        ],
+    )
+    conn.execute(
+        schema.enriquecimiento_conversacion.insert(),
+        [
+            {"conversacion_id": "CONV-1", "lead_id": "LD-1", "modelo_interes_texto": "AKT 125",
+             "sku_interes": None, "presupuesto_monto": None, "forma_pago": "NO_INFORMA",
+             "intencion": "BAJA", "objecion_principal": "SOLO_COMPARANDO", "pidio_cita": False,
+             "pidio_cotizacion": False, "confianza_global": 0.6, "extraccion_status": "OK",
+             "detalle_error": None, "modelo_llm": "test", "fecha_extraccion": datetime.now()},
+            {"conversacion_id": "CONV-2", "lead_id": "LD-1", "modelo_interes_texto": "Bajaj Discover 125",
+             "sku_interes": None, "presupuesto_monto": 1_000_000, "forma_pago": "CONTADO",
+             "intencion": "ALTA", "objecion_principal": "NINGUNA", "pidio_cita": True,
+             "pidio_cotizacion": False, "confianza_global": 1.0, "extraccion_status": "OK",
+             "detalle_error": None, "modelo_llm": "test", "fecha_extraccion": datetime.now()},
+        ],
+    )
+    conn.commit()
+    metricas = ColectorMetricas(run_id="test", fase="fase4")
+
+    scores = calcular_scores(conn, metricas, ahora=datetime(2026, 9, 15, 9, 30))
+
+    filas_ld1 = [s for s in scores if s["lead_id"] == "LD-1"]
+    assert len(filas_ld1) == 1
+    # Debe reflejar CONV-2 (la mas reciente: intencion ALTA), no CONV-1 (BAJA).
+    assert filas_ld1[0]["temperatura"] == "CALIENTE"
+
+
 def test_persistir_scores_es_refresco_completo(conn):
     conn.execute(
         schema.lead_scores.insert(),
