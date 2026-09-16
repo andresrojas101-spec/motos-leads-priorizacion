@@ -52,7 +52,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 _MODELO_POR_DEFECTO = {
-    "groq": "llama-3.3-70b-versatile",
+    "groq": "openai/gpt-oss-20b",
     "anthropic": "claude-sonnet-5",
 }
 # El catálogo de modelos de Groq cambia con más frecuencia que el de Anthropic: si el
@@ -60,10 +60,13 @@ _MODELO_POR_DEFECTO = {
 # fijarlo explícitamente en MODELO_LLM dentro de .env.
 MODELO_LLM = os.getenv("MODELO_LLM", _MODELO_POR_DEFECTO.get(PROVEEDOR_LLM, ""))
 
-# Concurrencia conservadora por defecto: las cuentas gratuitas de Groq limitan peticiones
-# por minuto: valores altos aquí disparan más 429 (rate limit) de los que vale la pena
-# absorber con reintentos. Subir si tu plan lo permite.
-EXTRACCION_MAX_WORKERS = int(os.getenv("EXTRACCION_MAX_WORKERS", "4"))
+# Concurrencia conservadora por defecto. Verificado en piloto real: la capa gratuita de
+# Groq limita por tokens/minuto A NIVEL DE CUENTA (8.000 TPM para gpt-oss-20b), no por
+# conexión — cada extracción usa ~1.200-1.900 tokens, así que el techo real es de solo
+# ~5 peticiones/minuto sin importar cuántos workers corran en paralelo. Más workers no
+# aumenta el throughput, solo multiplica los 429 que hay que reintentar. 2 es un balance
+# entre llenar el tiempo muerto de latencia de red y no generar contención innecesaria.
+EXTRACCION_MAX_WORKERS = int(os.getenv("EXTRACCION_MAX_WORKERS", "2"))
 
 
 def configurar_logging(nivel: int = logging.INFO) -> None:
