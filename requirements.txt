@@ -1,0 +1,11 @@
+# Fase 1 - ingesta, normalizacion, deduplicacion
+pandas>=2.2
+SQLAlchemy>=2.0
+rapidfuzz>=3.9
+python-dotenv>=1.0
+
+# Fase 2 - extraccion con IA (validacion de salida estructurada)
+pydantic>=2.7
+
+# Desarrollo
+pytest>=8.0
