@@ -95,9 +95,14 @@ def ejecutar_fase2(limite: int | None = None) -> ColectorMetricas:
         run_id, PROVEEDOR_LLM, MODELO_LLM, f" (limite={limite})" if limite else "",
     )
 
-    with engine.begin() as conn:
+    # engine.connect() (no .begin()): ejecutar_extraccion hace sus propios commits
+    # incrementales por lote. Con .begin() todo quedaria atrapado en una unica
+    # transaccion de horas, sin durabilidad real hasta el final -- justo el problema que
+    # la persistencia incremental busca evitar. Ver docstring de ejecutar_extraccion.
+    with engine.connect() as conn:
         ejecutar_extraccion(conn, cliente, metricas, limite=limite)
         metricas.persistir(conn)
+        conn.commit()
 
     log.info("Fase 2 completada")
     return metricas

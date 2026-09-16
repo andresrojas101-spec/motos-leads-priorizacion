@@ -282,3 +282,58 @@ def test_ejecutar_extraccion_respeta_el_limite(conn):
 
     filas = conn.execute(select(schema.enriquecimiento_conversacion)).mappings().all()
     assert len(filas) == 2
+
+
+def test_persistencia_incremental_sobrevive_a_un_fallo_a_mitad_de_camino(conn, monkeypatch):
+    """Prueba la propiedad real que motivo el fix: si el proceso truena a mitad de un
+    batch largo, las conversaciones de los lotes ya completados no deben perderse -- solo
+    las del lote que estaba en curso cuando ocurrio el fallo.
+
+    Simula un fallo "externo" (no una falla de extraccion, que ya esta cubierta por R13):
+    algo revienta en EmparejadorModelos.emparejar en la 4ta conversacion procesada, un
+    punto de falla real que hoy no esta protegido por el try/except de procesar_conversacion.
+    """
+    conn.execute(
+        schema.catalogo_motos.insert(),
+        [{"sku": "SKU-012", "marca": "Bajaj", "linea": "Discover 125", "modelo_normalizado": "Bajaj Discover 125",
+          "cilindraje": 124, "segmento": "Trabajo", "precio_lista": 6_990_000, "unidades_disponibles": 6}],
+    )
+    conn.execute(
+        schema.conversaciones.insert(),
+        [
+            {"conversacion_id": f"CONV-{i}", "lead_id": f"LD-{i}", "lead_id_declarado": f"LD-{i}",
+             "empresa_id": "EMP-01", "canal": "WHATSAPP", "fecha_inicio": datetime(2026, 8, 1),
+             "num_mensajes": 1, "estado_vinculacion": "VINCULADA"}
+            for i in range(1, 6)
+        ],
+    )
+    conn.execute(
+        schema.mensajes.insert(),
+        [{"conversacion_id": f"CONV-{i}", "orden": 1, "emisor": "cliente", "hora": "10:00", "texto": "hola"}
+         for i in range(1, 6)],
+    )
+    conn.commit()
+
+    contador = {"n": 0}
+    original = EmparejadorModelos.emparejar
+
+    def emparejar_con_fallo_en_el_cuarto(self, texto):
+        contador["n"] += 1
+        if contador["n"] == 4:
+            raise RuntimeError("fallo simulado (ej. corte de luz, excepcion no prevista)")
+        return original(self, texto)
+
+    monkeypatch.setattr(EmparejadorModelos, "emparejar", emparejar_con_fallo_en_el_cuarto)
+
+    cliente = ClienteLLMFalso(lambda t, r: RESPUESTA_VALIDA)
+    metricas = ColectorMetricas(run_id="test-crash", fase="fase2")
+
+    # max_workers=1 para que el orden de procesamiento sea determinista (submission order).
+    with pytest.raises(RuntimeError, match="fallo simulado"):
+        ejecutar_extraccion(conn, cliente, metricas, max_workers=1, tamano_lote_commit=2)
+
+    # Las primeras 2 (el lote ya commiteado antes del fallo en la 4ta) deben sobrevivir,
+    # aunque la funcion como un todo haya terminado en excepcion.
+    filas = conn.execute(select(schema.enriquecimiento_conversacion)).mappings().all()
+    assert len(filas) == 2
+    assert {f["conversacion_id"] for f in filas} == {"CONV-1", "CONV-2"}

@@ -170,6 +170,9 @@ def procesar_conversacion(
     return fila, presupuesto_descartado
 
 
+TAMANO_LOTE_COMMIT = 25  # ~5 min de trabajo a 5 llamadas/min: poco que perder si algo falla
+
+
 def ejecutar_extraccion(
     conn: Connection,
     cliente: ClienteLLM,
@@ -177,13 +180,22 @@ def ejecutar_extraccion(
     *,
     limite: int | None = None,
     max_workers: int = EXTRACCION_MAX_WORKERS,
+    tamano_lote_commit: int = TAMANO_LOTE_COMMIT,
 ) -> None:
     """Punto de entrada de la Fase 2.
 
     `limite` permite correr sobre una muestra pequeña (útil para validar costo y calidad
     antes de lanzar las ~665 conversaciones vinculadas). Las llamadas al LLM son
-    I/O-bound, por lo que se paralelizan con hilos; toda escritura a la base de datos
-    ocurre después, en el hilo principal.
+    I/O-bound, por lo que se paralelizan con hilos.
+
+    **Persistencia incremental, no al final**: para un batch de ~665 conversaciones que
+    puede tardar horas en la capa gratuita, acumular todo en memoria y escribir un único
+    INSERT al final significa perder TODO el progreso si el proceso muere por cualquier
+    motivo (corte de luz, la terminal se cierra, una excepción no capturada) un segundo
+    antes de terminar. Cada `tamano_lote_commit` conversaciones completadas se escriben y
+    se hace `conn.commit()` de inmediato — el llamador (`pipeline.py`) debe usar
+    `engine.connect()`, no `engine.begin()`, para que estos commits intermedios sean
+    reales y no queden atrapados dentro de una única transacción de horas.
     """
     emparejador = cargar_emparejador_desde_db(conn)
     pendientes = _conversaciones_pendientes(conn, limite)
@@ -195,8 +207,15 @@ def ejecutar_extraccion(
 
     transcripciones = {p["conversacion_id"]: _transcripcion_de(conn, p["conversacion_id"]) for p in pendientes}
 
-    filas: list[dict] = []
+    filas: list[dict] = []  # se conserva todo para las metricas finales del resumen
+    lote: list[dict] = []
     presupuestos_descartados = 0
+
+    def volcar_lote() -> None:
+        if lote:
+            conn.execute(schema.enriquecimiento_conversacion.insert(), lote)
+            conn.commit()
+            lote.clear()
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futuros = {
@@ -213,11 +232,18 @@ def ejecutar_extraccion(
         for i, futuro in enumerate(as_completed(futuros), start=1):
             fila, descartado = futuro.result()
             filas.append(fila)
+            lote.append(fila)
             presupuestos_descartados += int(descartado)
-            if i % 50 == 0 or i == len(futuros):
+            if len(lote) >= tamano_lote_commit:
+                volcar_lote()
+                log.info(
+                    "Extraccion: %d/%d conversaciones procesadas (checkpoint guardado)",
+                    i, len(futuros),
+                )
+            elif i % 50 == 0 or i == len(futuros):
                 log.info("Extraccion: %d/%d conversaciones procesadas", i, len(futuros))
 
-    conn.execute(schema.enriquecimiento_conversacion.insert(), filas)
+    volcar_lote()  # remanente que no alcanzo a completar un lote
 
     conteo_estado = {"OK": 0, "REINTENTO_OK": 0, "FALLO": 0}
     confianzas = []
