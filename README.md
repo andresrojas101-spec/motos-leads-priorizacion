@@ -32,7 +32,7 @@ después. Hoy, el 32 % de los leads no tiene registrado ningún primer contacto.
 |---|---|---|
 | 0 | Modelo de datos, reglas de negocio, scaffolding | ✅ |
 | 1 | Ingesta + normalización + deduplicación | ✅ |
-| 2 | Extracción con IA desde conversaciones | ⏳ |
+| 2 | Extracción con IA desde conversaciones | ✅ (código listo; falta la corrida real — ver abajo) |
 | 3 | Scoring y priorización validados contra el histórico | ⏳ |
 | 4 | Persistencia final + asignación a asesores | ⏳ |
 | 5 | Automatización end-to-end | ⏳ |
@@ -43,15 +43,23 @@ después. Hoy, el 32 % de los leads no tiene registrado ningún primer contacto.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env          # opcional: por defecto usa SQLite local
+cp .env.example .env          # completar ANTHROPIC_API_KEY para la Fase 2
 
-python pipeline.py --fase 1   # ingesta + normalización + deduplicación
-pytest -q                     # 64 tests de los normalizadores
-python -m src.schema          # regenera db/schema.sql
+python pipeline.py --fase 1               # ingesta + normalización + deduplicación
+python pipeline.py --fase 2 --limite 20   # extracción con IA — probar en una muestra primero
+python pipeline.py --fase 2               # extracción sobre las ~665 conversaciones vinculadas
+pytest -q                                 # 86 tests (normalizadores + extracción con IA)
+python -m src.schema                      # regenera db/schema.sql
 ```
 
-El pipeline hace refresco completo: cada corrida reconstruye el almacén desde
-`data/raw/`, por lo que es idempotente y re-ejecutable sin efectos acumulativos.
+El pipeline hace refresco completo en la Fase 1 (reconstruye el almacén desde
+`data/raw/` en cada corrida, por lo que es idempotente) y refresco incremental en la
+Fase 2 (solo procesa conversaciones sin extracción previa, por lo que es reanudable).
+
+**Nota sobre la Fase 2**: el código está completo y cubierto por 22 tests con un cliente
+LLM falso (no requiere red). La corrida real necesita una `ANTHROPIC_API_KEY` propia en
+`.env` — recomendado probar primero con `--limite 20` para validar costo y calidad antes
+de lanzar el lote completo.
 
 ## Resultado de la Fase 1
 
@@ -79,7 +87,7 @@ data/raw/*.csv,json
   Deduplicación por (empresa_id, teléfono)  ──►  personas
         │
         ▼
-  Extracción LLM ──► validación de esquema ──► reintento ──► fallo controlado   [Fase 2]
+  Extracción LLM (tool-use forzado) ──► validación ──► reintento (1x) ──► fallo controlado   [Fase 2 ✅]
         │
         ▼
   Scorecard de reglas ponderadas, calibrado con historico_cierres   [Fase 3]
@@ -133,6 +141,21 @@ está lo condena a no recibir atención nunca — que es exactamente el problema
 su motivo y su payload original. Las 12 conversaciones huérfanas se cargan marcadas como
 tales en vez de borrarse.
 
+**La extracción con IA responde por `tool_choice` forzado, nunca por texto libre.** Pedirle
+al modelo que "responda en JSON" en un prompt de texto es la forma menos confiable de
+sacar salida estructurada — el modelo puede envolverla en markdown, agregar prosa antes o
+saltarse un campo. Forzar una herramienta (`tool_choice={"type": "tool", ...}`) con el
+esquema generado desde el mismo modelo Pydantic que valida la respuesta hace que la salida
+sea estructuralmente correcta por construcción, no por suerte de prompting.
+
+**Un solo reintento, no una cola de reintentos.** El esquema de extracción es fijo y
+conocido de antemano — no hay nada que un agente deba "descubrir" reintentando. Si el
+primer intento no cumple el esquema, un segundo intento con un prompt más estricto resuelve
+la inmensa mayoría de los casos; más allá de eso, el problema probablemente no es de
+formato sino de que la conversación es genuinamente ambigua, y seguir reintentando solo
+añade costo sin mejorar el resultado. La conversación queda marcada `FALLO` y visible para
+auditoría, en vez de reintentarse indefinidamente en silencio.
+
 ## Supuestos asumidos
 
 - `canal` en `leads.csv` es el canal de **origen**; la conversación de WhatsApp es el canal
@@ -166,17 +189,20 @@ tales en vez de borrarse.
 ```
 ├── pipeline.py                   Punto de entrada (un solo disparo)
 ├── src/
-│   ├── config.py                 Rutas, DATABASE_URL, umbrales
+│   ├── config.py                 Rutas, DATABASE_URL, umbrales, config del LLM
 │   ├── schema.py                 Esquema (16 tablas) — fuente única de verdad
 │   ├── normalizadores.py         R1-R6, R11, R12 — funciones puras
 │   ├── ingesta.py                Carga de dimensiones, leads, conversaciones, histórico
 │   ├── dedup.py                  R8 — identidad de persona
-│   └── calidad.py                Reporte y métricas de calidad
+│   ├── calidad.py                Reporte y métricas de calidad
+│   ├── esquema_extraccion.py     R13 — esquema Pydantic + validación semántica
+│   ├── llm_cliente.py            R13 — cliente Anthropic (tool-use forzado)
+│   └── extraccion.py             R13 — orquestación: reintento, fallo, batch concurrente
 ├── db/schema.sql                 DDL PostgreSQL generado y versionado
 ├── docs/
 │   ├── modelo-datos.md           ERD y decisiones de modelado
-│   └── reglas-normalizacion.md   R1-R12 con evidencia del dataset
-├── tests/                        64 tests sobre casos reales del dataset
+│   └── reglas-normalizacion.md   R1-R13 con evidencia del dataset
+├── tests/                        86 tests sobre casos reales del dataset
 └── data/raw/                     Archivos fuente (sintéticos)
 ```
 

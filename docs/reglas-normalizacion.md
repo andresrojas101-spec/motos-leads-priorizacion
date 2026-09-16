@@ -246,6 +246,55 @@ nombre canónico de la persona en R8.
 
 ---
 
+## R13 — Extracción con IA desde conversaciones
+
+**Problema**: el enunciado pide extraer de `conversaciones.json` seis atributos que hoy
+están en texto libre coloquial: modelo de interés, presupuesto o cuota inicial, forma de
+pago, intención declarada, objeción principal, y si pidió cita o cotización.
+
+**Regla — dos puertas de validación antes de persistir**:
+
+1. **Puerta de esquema** (`esquema_extraccion.parsear_y_validar`): el LLM responde
+   obligatoriamente vía *tool use* forzado (`tool_choice`), nunca con prosa libre. Pydantic
+   valida tipos y enums. Si la respuesta no calza con el esquema (enum inventado, campo
+   obligatorio ausente, tipo incorrecto) o la llamada de red falla, se **reintenta una
+   vez** con un prompt que insiste en el formato exacto.
+2. **Puerta semántica** (`esquema_extraccion.validar_semantica`): reglas que Pydantic no
+   puede expresar. La única implementada hoy es el rango plausible de
+   `presupuesto_monto` ($50.000–$30.000.000 COP, acorde al rango de precios del
+   catálogo). Un valor fuera de rango **no invalida toda la extracción** — se anula solo
+   ese campo, porque casi siempre es el LLM confundiendo el precio de lista que cita el
+   asesor con el aporte real del cliente.
+
+Si ambos intentos fallan la puerta de esquema, la conversación queda con
+`extraccion_status = 'FALLO'` y todos los campos nulos. **El pipeline no se detiene**: el
+lead correspondiente sigue siendo priorizable en la Fase 3 con la información de `leads`,
+solo que sin enriquecimiento — la falla degrada el resultado, no lo bloquea.
+
+**Separación de responsabilidades — por qué el LLM no resuelve el SKU**: el modelo
+devuelve `modelo_interes_texto` como lo dijo el cliente (texto libre); la resolución a
+`sku_interes` la hace el mismo `EmparejadorModelos` de R6, reutilizado tal cual. Es
+deliberado: un LLM puede alucinar un SKU que no existe, mientras que la cascada
+determinística de R6 ya está probada contra el catálogo real y es auditable de la misma
+forma en ambas fases.
+
+**Por qué no hay una "puerta de agente" con reintentos ilimitados o replanificación**: el
+esquema es fijo y conocido de antemano — no hay nada que planificar. Un solo reintento
+con un prompt más estricto resuelve la inmensa mayoría de fallas de formato; más
+reintentos solo añaden costo y latencia sin mejorar la tasa de éxito de forma
+significativa, y un fallo genuino (conversación ambigua, respuesta mal formada dos veces)
+debe quedar visible como dato, no ocultarse detrás de reintentos indefinidos.
+
+**Confianza como dato, no como umbral oculto**: `confianza_global` es la autoevaluación
+del LLM sobre los campos que sí llenó, no sobre cuántos llenó. Una conversación de "solo
+estaba mirando" legítimamente deja casi todo en `null` — eso es información real sobre el
+lead (baja intención), no una extracción fallida. El scoring de la Fase 3 puede usar
+`confianza_global` para ponderar, pero **nunca** el `extraccion_status` ni la confianza
+deciden la prioridad por sí mismos: esa decisión sigue siendo enteramente del scorecard
+determinístico.
+
+---
+
 ## Resumen de destino de cada anomalía detectada
 
 | Anomalía | Destino |

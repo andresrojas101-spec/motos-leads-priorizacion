@@ -99,20 +99,53 @@ dedup por empresa da **1.451 personas (49 colapsos legítimos)**.
 ```bash
 pip install -r requirements.txt
 
-python -m src.schema            # regenera db/schema.sql (DDL PostgreSQL)
-python pipeline.py --fase 1     # ingesta + normalización + dedup
-python pipeline.py              # pipeline completo (cuando estén todas las fases)
+python -m src.schema              # regenera db/schema.sql (DDL PostgreSQL)
+python pipeline.py --fase 1       # ingesta + normalización + dedup
+python pipeline.py --fase 2       # extracción con IA (requiere ANTHROPIC_API_KEY en .env)
+python pipeline.py --fase 2 --limite 20   # prueba de costo/calidad sobre una muestra
+python pipeline.py                # pipeline completo (cuando estén todas las fases)
 
-pytest -q                       # tests de normalizadores
+pytest -q                         # 86 tests: normalizadores + esquema + orquestación de IA
 ```
 
 Base de datos por defecto: `sqlite:///data/warehouse.db` (override con `DATABASE_URL`).
+
+## Fase 2 — extracción con IA (detalle de implementación)
+
+- **Salida estructurada forzada**: `src/llm_cliente.py` usa `tool_choice` de la API de
+  Anthropic (nunca pide JSON en texto libre). El esquema del tool se genera desde el
+  mismo modelo Pydantic (`src/esquema_extraccion.py`) que valida la respuesta — una sola
+  fuente de verdad para lo que el LLM puede devolver.
+- **Dos puertas de validación**: esquema (Pydantic/enums) y semántica (rango plausible de
+  `presupuesto_monto`). Ver regla **R13** en `docs/reglas-normalizacion.md`.
+- **1 reintento, no más**: el esquema es fijo y conocido, así que no hay nada que
+  replanificar. Si el reintento también falla, `extraccion_status='FALLO'` y el pipeline
+  sigue — el lead queda priorizable sin enriquecimiento, nunca bloqueado.
+- **`ClienteLLM` es un Protocol**, no una clase concreta: la lógica de negocio
+  (`src/extraccion.py`) se testea con `ClienteLLMFalso` (en `tests/test_extraccion.py`)
+  sin tocar la red ni necesitar una API key. `ClienteAnthropic` es la única pieza que
+  habla con la API real.
+- **Reanudable**: `_conversaciones_pendientes()` excluye las que ya tienen fila en
+  `enriquecimiento_conversacion`, así que una corrida interrumpida se completa
+  relanzando el mismo comando sin reprocesar (ni recobrar) lo ya hecho.
+- **Concurrencia**: `ThreadPoolExecutor` (I/O-bound) para las ~665 conversaciones
+  vinculadas; las escrituras a la base de datos ocurren después, en el hilo principal.
+- **El LLM nunca resuelve el SKU**: devuelve `modelo_interes_texto` en texto libre: el
+  mismo `EmparejadorModelos` de la Fase 1 (R6) lo resuelve a `sku_interes`, reutilizando
+  la cascada ya probada contra el catálogo en vez de confiar en que el LLM no alucine un
+  SKU inexistente.
+- **Sin probar en vivo todavía**: no hay `ANTHROPIC_API_KEY` en este entorno de
+  desarrollo. El código está cubierto por 22 tests con un cliente falso, pero la corrida
+  real sobre las 665 conversaciones vinculadas (costo y calidad en producción) queda
+  pendiente de que el usuario configure su llave y ejecute
+  `python pipeline.py --fase 2 --limite 20` como prueba piloto antes del batch completo.
 
 ## Estado por fases
 
 - [x] **Fase 0** — Modelo de datos, reglas de negocio, scaffolding
 - [x] **Fase 1** — Ingesta + normalización + deduplicación
-- [ ] **Fase 2** — Extracción con IA desde conversaciones
+- [x] **Fase 2** — Extracción con IA desde conversaciones (código completo y testeado;
+      pendiente de ejecución real con `ANTHROPIC_API_KEY` del usuario)
 - [ ] **Fase 3** — Scoring y priorización (validado contra histórico)
 - [ ] **Fase 4** — Persistencia final + asignación a asesores
 - [ ] **Fase 5** — Automatización end-to-end
