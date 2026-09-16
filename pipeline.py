@@ -51,11 +51,17 @@ def ejecutar_fase1() -> ColectorMetricas:
     engine = create_engine(DATABASE_URL)
 
     log.info("Iniciando %s sobre %s", run_id, engine.url.render_as_string(hide_password=True))
-    # Se reconstruyen solo las tablas de datos; el historial de auditoria se conserva.
-    schema.metadata.drop_all(engine, tables=schema.tablas_de_datos())
     schema.metadata.create_all(engine)
 
     with engine.begin() as conn:
+        # Se vacian solo las tablas de datos (el historial de auditoria se conserva), con
+        # DELETE en vez de DROP TABLE: `enriquecimiento_conversacion`/`lead_scores`/
+        # `asignaciones` tienen FK hacia estas tablas y sobreviven al refresco (sus FK son
+        # deferrable, ver schema.py) porque los ids se reinsertan identicos mas abajo --
+        # DROP TABLE rompia esa referencia en Postgres (FK no diferible a nivel de DDL).
+        for tabla in schema.tablas_de_datos():
+            conn.execute(tabla.delete())
+
         emparejador = cargar_dimensiones(conn, metricas)
 
         candidatos, rechazados = normalizar_leads(emparejador, metricas)

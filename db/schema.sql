@@ -145,8 +145,8 @@ CREATE TABLE leads (
 	FOREIGN KEY(punto_venta_id) REFERENCES puntos_venta (punto_venta_id), 
 	FOREIGN KEY(sku_interes) REFERENCES catalogo_motos (sku)
 );
-CREATE INDEX ix_leads_empresa_id ON leads (empresa_id);
 CREATE INDEX ix_leads_persona_id ON leads (persona_id);
+CREATE INDEX ix_leads_empresa_id ON leads (empresa_id);
 
 CREATE TABLE asignaciones (
 	id SERIAL NOT NULL, 
@@ -156,9 +156,9 @@ CREATE TABLE asignaciones (
 	fecha_asignacion DATE NOT NULL, 
 	orden_prioridad INTEGER NOT NULL, 
 	PRIMARY KEY (id), 
-	FOREIGN KEY(lead_id) REFERENCES leads (lead_id), 
-	FOREIGN KEY(asesor_id) REFERENCES asesores (asesor_id), 
-	FOREIGN KEY(empresa_id) REFERENCES empresas (empresa_id)
+	FOREIGN KEY(lead_id) REFERENCES leads (lead_id) DEFERRABLE INITIALLY DEFERRED, 
+	FOREIGN KEY(asesor_id) REFERENCES asesores (asesor_id) DEFERRABLE INITIALLY DEFERRED, 
+	FOREIGN KEY(empresa_id) REFERENCES empresas (empresa_id) DEFERRABLE INITIALLY DEFERRED
 );
 CREATE INDEX ix_asignaciones_asesor_id ON asignaciones (asesor_id);
 CREATE INDEX ix_asignaciones_lead_id ON asignaciones (lead_id);
@@ -176,8 +176,8 @@ CREATE TABLE conversaciones (
 	FOREIGN KEY(lead_id) REFERENCES leads (lead_id), 
 	FOREIGN KEY(empresa_id) REFERENCES empresas (empresa_id)
 );
-CREATE INDEX ix_conversaciones_lead_id ON conversaciones (lead_id);
 CREATE INDEX ix_conversaciones_empresa_id ON conversaciones (empresa_id);
+CREATE INDEX ix_conversaciones_lead_id ON conversaciones (lead_id);
 
 CREATE TABLE lead_scores (
 	lead_id VARCHAR(20) NOT NULL, 
@@ -188,8 +188,8 @@ CREATE TABLE lead_scores (
 	version_scoring VARCHAR(20) NOT NULL, 
 	fecha_calculo TIMESTAMP WITHOUT TIME ZONE, 
 	PRIMARY KEY (lead_id), 
-	FOREIGN KEY(lead_id) REFERENCES leads (lead_id), 
-	FOREIGN KEY(empresa_id) REFERENCES empresas (empresa_id)
+	FOREIGN KEY(lead_id) REFERENCES leads (lead_id) DEFERRABLE INITIALLY DEFERRED, 
+	FOREIGN KEY(empresa_id) REFERENCES empresas (empresa_id) DEFERRABLE INITIALLY DEFERRED
 );
 CREATE INDEX ix_lead_scores_empresa_id ON lead_scores (empresa_id);
 
@@ -210,9 +210,9 @@ CREATE TABLE enriquecimiento_conversacion (
 	modelo_llm VARCHAR(40), 
 	fecha_extraccion TIMESTAMP WITHOUT TIME ZONE, 
 	PRIMARY KEY (conversacion_id), 
-	FOREIGN KEY(conversacion_id) REFERENCES conversaciones (conversacion_id), 
-	FOREIGN KEY(lead_id) REFERENCES leads (lead_id), 
-	FOREIGN KEY(sku_interes) REFERENCES catalogo_motos (sku)
+	FOREIGN KEY(conversacion_id) REFERENCES conversaciones (conversacion_id) DEFERRABLE INITIALLY DEFERRED, 
+	FOREIGN KEY(lead_id) REFERENCES leads (lead_id) DEFERRABLE INITIALLY DEFERRED, 
+	FOREIGN KEY(sku_interes) REFERENCES catalogo_motos (sku) DEFERRABLE INITIALLY DEFERRED
 );
 CREATE INDEX ix_enriquecimiento_conversacion_lead_id ON enriquecimiento_conversacion (lead_id);
 

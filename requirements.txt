@@ -3,6 +3,7 @@ pandas>=2.2
 SQLAlchemy>=2.0
 rapidfuzz>=3.9
 python-dotenv>=1.0
+psycopg[binary]>=3.1  # driver Postgres -- SQLite en dev local, Postgres en prod (DATABASE_URL)
 
 # Fase 2 - extraccion con IA (validacion de salida estructurada)
 pydantic>=2.7

@@ -207,10 +207,25 @@ historico_cierres = Table(
 enriquecimiento_conversacion = Table(
     "enriquecimiento_conversacion",
     metadata,
-    Column("conversacion_id", String(20), ForeignKey("conversaciones.conversacion_id"), primary_key=True),
-    Column("lead_id", String(20), ForeignKey("leads.lead_id"), index=True),
+    # deferrable: la Fase 1 refresca `conversaciones`/`leads`/`catalogo_motos` completos en
+    # cada corrida (DELETE + re-INSERT dentro de una sola transaccion, ids deterministas
+    # desde los archivos crudos) sin tocar esta tabla. Sin diferir el chequeo de FK,
+    # Postgres rechazaria el DELETE intermedio aunque el estado final sea consistente.
+    Column(
+        "conversacion_id",
+        String(20),
+        ForeignKey("conversaciones.conversacion_id", deferrable=True, initially="DEFERRED"),
+        primary_key=True,
+    ),
+    Column(
+        "lead_id", String(20), ForeignKey("leads.lead_id", deferrable=True, initially="DEFERRED"), index=True
+    ),
     Column("modelo_interes_texto", String(120)),
-    Column("sku_interes", String(10), ForeignKey("catalogo_motos.sku")),
+    Column(
+        "sku_interes",
+        String(10),
+        ForeignKey("catalogo_motos.sku", deferrable=True, initially="DEFERRED"),
+    ),
     Column("presupuesto_monto", Integer),
     Column("forma_pago", String(20)),
     Column("intencion", String(20)),
@@ -230,8 +245,20 @@ enriquecimiento_conversacion = Table(
 lead_scores = Table(
     "lead_scores",
     metadata,
-    Column("lead_id", String(20), ForeignKey("leads.lead_id"), primary_key=True),
-    Column("empresa_id", String(10), ForeignKey("empresas.empresa_id"), nullable=False, index=True),
+    # deferrable: mismo motivo que en enriquecimiento_conversacion.
+    Column(
+        "lead_id",
+        String(20),
+        ForeignKey("leads.lead_id", deferrable=True, initially="DEFERRED"),
+        primary_key=True,
+    ),
+    Column(
+        "empresa_id",
+        String(10),
+        ForeignKey("empresas.empresa_id", deferrable=True, initially="DEFERRED"),
+        nullable=False,
+        index=True,
+    ),
     Column("score_total", Float, nullable=False),
     Column("temperatura", String(10), nullable=False),
     # Aporte de cada componente del scorecard: hace auditable el "por qué" de la prioridad.
@@ -243,10 +270,28 @@ lead_scores = Table(
 asignaciones = Table(
     "asignaciones",
     metadata,
+    # deferrable: mismo motivo que en enriquecimiento_conversacion.
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("lead_id", String(20), ForeignKey("leads.lead_id"), nullable=False, index=True),
-    Column("asesor_id", String(10), ForeignKey("asesores.asesor_id"), nullable=False, index=True),
-    Column("empresa_id", String(10), ForeignKey("empresas.empresa_id"), nullable=False),
+    Column(
+        "lead_id",
+        String(20),
+        ForeignKey("leads.lead_id", deferrable=True, initially="DEFERRED"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "asesor_id",
+        String(10),
+        ForeignKey("asesores.asesor_id", deferrable=True, initially="DEFERRED"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "empresa_id",
+        String(10),
+        ForeignKey("empresas.empresa_id", deferrable=True, initially="DEFERRED"),
+        nullable=False,
+    ),
     Column("fecha_asignacion", Date, nullable=False),
     Column("orden_prioridad", Integer, nullable=False),
 )
