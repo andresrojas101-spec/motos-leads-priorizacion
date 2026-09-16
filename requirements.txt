@@ -11,5 +11,8 @@ openai>=1.50      # proveedor por defecto: habla con Ollama local via su API com
 groq>=0.11        # alternativo (capa gratuita en la nube), ver PROVEEDOR_LLM en .env
 anthropic>=0.40   # alternativo de pago, ver PROVEEDOR_LLM en .env
 
+# Fase 6 - tablero publico
+streamlit>=1.38
+
 # Desarrollo
 pytest>=8.0
