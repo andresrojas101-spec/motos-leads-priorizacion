@@ -38,6 +38,11 @@ NOMBRES_EMPRESAS = {
 UMBRAL_FUZZY_CIUDAD = 90
 UMBRAL_FUZZY_MODELO = 88
 
+# Fase 2 - extracción con IA desde conversaciones (ver docs/reglas-normalizacion.md, R13).
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+MODELO_LLM = os.getenv("MODELO_LLM", "claude-sonnet-5")
+EXTRACCION_MAX_WORKERS = int(os.getenv("EXTRACCION_MAX_WORKERS", "8"))
+
 
 def configurar_logging(nivel: int = logging.INFO) -> None:
     """Configura el logging del pipeline con formato uniforme."""
