@@ -34,6 +34,12 @@ RESPUESTA_VALIDA = {
 RESPUESTA_CON_ENUM_INVALIDO = dict(RESPUESTA_VALIDA, forma_pago="EFECTIVO_MAGICO")
 
 
+@pytest.fixture(autouse=True)
+def _sin_espera_entre_reintentos(monkeypatch):
+    """Evita que los tests de reintento paguen el backoff real (pensado para 429 de red)."""
+    monkeypatch.setattr("src.extraccion.ESPERA_ENTRE_INTENTOS_SEGUNDOS", 0.0)
+
+
 class ClienteLLMFalso:
     """Doble de pruebas: no hace red, devuelve lo que decida `respuesta_fn`.
 

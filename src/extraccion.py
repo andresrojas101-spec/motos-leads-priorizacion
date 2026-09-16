@@ -18,6 +18,7 @@ del scorecard determinístico de la Fase 3, que puede ponderar según `confianza
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -33,6 +34,11 @@ from src.normalizadores import EmparejadorModelos
 log = logging.getLogger(__name__)
 
 MAX_INTENTOS = 2  # intento inicial + 1 reintento
+
+# Pausa antes del reintento. Con proveedores de capa gratuita (Groq) una parte de los
+# fallos son 429 por límite de tasa, no errores de formato: esperar un poco evita que el
+# reintento inmediato choque otra vez contra el mismo límite.
+ESPERA_ENTRE_INTENTOS_SEGUNDOS = 2.0
 
 
 def cargar_emparejador_desde_db(conn: Connection) -> EmparejadorModelos:
@@ -127,6 +133,8 @@ def procesar_conversacion(
                 "Extraccion fallo en %s (intento %d/%d): %s: %s",
                 conversacion_id, intento + 1, MAX_INTENTOS, type(exc).__name__, exc,
             )
+            if intento < MAX_INTENTOS - 1:
+                time.sleep(ESPERA_ENTRE_INTENTOS_SEGUNDOS)
             continue
 
         datos = resultado.datos
