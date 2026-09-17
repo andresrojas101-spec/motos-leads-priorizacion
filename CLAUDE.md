@@ -313,10 +313,15 @@ de tocar `src/scoring.py`, no repetir el razonamiento aquí.
       CALIENTE / 143 TIBIO / 1.144 FRÍO), 688 asignados, 620 exceden capacidad diaria
 - [x] **Fase 5** — Automatización: `.github/workflows/pipeline.yml` corre
       `python pipeline.py` completo con un solo trigger (cron diario + `workflow_dispatch`
-      manual). Pendiente de un Postgres hospedado real (`DATABASE_URL` como secret) para
-      que la corrida en GitHub Actions funcione de punta a punta — ver detalle abajo.
-- [ ] **Fase 6** — Publicación (tablero)
-- [ ] **Fase 7** — Documentación y entregables
+      manual). Postgres real en Supabase configurado como secret `DATABASE_URL`, corrida
+      real en Actions validada de punta a punta (ver detalle abajo).
+- [x] **Fase 6** — Publicación: tablero en Streamlit Cloud
+      (https://motos-leads-priorizacion.streamlit.app/), leyendo directo de Supabase.
+      Verificado público de verdad en ventana de incógnito (sin sesión iniciada) — carga
+      y muestra datos sin pedir login. Simplificación documentada: selector de empresa en
+      vez de autenticación real (separación de datos SÍ garantizada, ver Fase 4).
+- [ ] **Fase 7** — Documentación y entregables (README y diagrama ya actualizados;
+      falta la presentación de máximo 8 diapositivas)
 
 ## Fase 5 — automatización end-to-end (detalle de implementación)
 
