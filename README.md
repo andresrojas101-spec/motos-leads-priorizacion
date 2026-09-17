@@ -32,24 +32,32 @@ después. Hoy, el 32 % de los leads no tiene registrado ningún primer contacto.
 |---|---|---|
 | 0 | Modelo de datos, reglas de negocio, scaffolding | ✅ |
 | 1 | Ingesta + normalización + deduplicación | ✅ |
-| 2 | Extracción con IA desde conversaciones | ✅ (validado en piloto real; batch completo corriendo) |
+| 2 | Extracción con IA desde conversaciones | ✅ 665/665 procesadas (550 OK + 42 OK-tras-reintento + 32 fallo) |
 | 3 | Scoring y priorización validados contra el histórico | ✅ (lift 2.89x validado; **CP2 aprobado**) |
-| 4 | Persistencia final + asignación a asesores | ✅ (1.308 leads scoreados, 688 asignados hoy) |
-| 5 | Automatización end-to-end | ⏳ |
-| 6 | Publicación (tablero) | ⏳ |
-| 7 | Documentación y entregables | ⏳ |
+| 4 | Persistencia final + asignación a asesores | ✅ 1.308 leads scoreados, 688 asignados hoy |
+| 5 | Automatización end-to-end | ✅ GitHub Actions (cron diario + disparo manual), validado con corrida real |
+| 6 | Publicación (tablero) | ✅ Streamlit Cloud, leyendo directo de Supabase |
+| 7 | Documentación y entregables | ⏳ en curso |
 
 ## Cómo se ejecuta
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env          # completar GROQ_API_KEY para la Fase 2 (gratis, sin tarjeta)
+cp .env.example .env
+
+# Extracción con IA: Ollama local por defecto (sin costo, sin llave, sin cuota diaria).
+# Instalar Ollama (https://ollama.com) y descargar el modelo una vez:
+ollama pull llama3.1:8b
 
 python pipeline.py --fase 1               # ingesta + normalización + deduplicación
 python pipeline.py --fase 2 --limite 20   # extracción con IA — probar en una muestra primero
 python pipeline.py --fase 2               # extracción sobre las ~665 conversaciones vinculadas
 python pipeline.py --fase 4               # scoring + asignación a asesores
-pytest -q                                 # 135 tests
+python pipeline.py                        # las tres fases en secuencia (lo que corre GitHub Actions)
+
+streamlit run tablero.py                  # tablero local, mismo código que en producción
+
+pytest -q                                 # 153 tests
 python -m src.schema                      # regenera db/schema.sql
 ```
 
@@ -57,18 +65,26 @@ El pipeline hace refresco completo en la Fase 1 (reconstruye el almacén desde
 `data/raw/` en cada corrida, por lo que es idempotente) y refresco incremental en la
 Fase 2 (solo procesa conversaciones sin extracción previa, por lo que es reanudable).
 
-**Nota sobre la Fase 2**: el código está completo y cubierto por 26 tests con un cliente
-LLM falso (no requiere red). El proveedor de IA es intercambiable por variable de entorno
-(`PROVEEDOR_LLM`, ver `.env.example`): por defecto usa **Groq** (capa gratuita, sin
-tarjeta de crédito) con el modelo `openai/gpt-oss-20b`, con Anthropic disponible como
-alternativa si en algún momento se prioriza calidad de extracción sobre costo.
+**Probar contra Postgres real en local** (no solo SQLite): `docker compose up -d` levanta
+un Postgres con `docker-compose.yml`, y `DATABASE_URL=postgresql+psycopg://motos:motos@localhost:5432/motos_leads`
+apunta el pipeline ahí. Así se encontró el bug de foreign keys descrito abajo, antes de
+que importara en producción.
 
-Piloto real ejecutado sobre 20 conversaciones: **19/20 exitosas** (confianza promedio
-0.876), tras corregir dos bugs reales que solo aparecieron contra la API real — ver
-"Decisiones tomadas" abajo. La capa gratuita limita a ~5 peticiones/minuto por cuenta
-(no por conexión), así que el lote completo de ~665 conversaciones toma **2-2.5 horas**
-en correr, no minutos — el proceso es reanudable por diseño, así que una interrupción no
-pierde el trabajo ya hecho.
+**Nota sobre la Fase 2**: el código está completo y cubierto por tests con un cliente LLM
+falso (no requiere red). El proveedor de IA es intercambiable por variable de entorno
+(`PROVEEDOR_LLM`, ver `.env.example`): **Ollama** local por defecto — sin costo, sin
+llave, sin límite de tasa ni cuota diaria, el único techo es el hardware propio — con
+Groq (capa gratuita en la nube) y Anthropic disponibles como alternativas documentadas.
+
+Se empezó con Groq por no requerir hardware propio: piloto real sobre 20 conversaciones,
+19/20 exitosas tras corregir dos bugs reales que solo aparecieron contra la API real (ver
+"Decisiones tomadas" abajo). En el batch completo apareció un tercer límite — cuota de
+200.000 tokens/día por modelo — que se agotó antes de terminar. Se migró a Ollama local
+(`llama3.1:8b`) para el batch completo: mismo formato de tool-calling forzado, sin
+límites de cuota. Resultado final sobre las 665 conversaciones: 550 OK al primer intento,
+42 OK tras reintento, 32 fallo definitivo (89% con datos utilizables). Groq/Anthropic
+quedan como alternativas ya probadas y documentadas, no se eliminó el código —
+`ClienteLLM` es un `Protocol`, cambiar de proveedor es una variable de entorno.
 
 ## Resultado de la Fase 1
 
@@ -82,12 +98,12 @@ pierde el trabajo ya hecho.
 
 ## Resultado de la Fase 4
 
-Corrido contra los datos reales (`python pipeline.py --fase 4`), con la fecha real de
-hoy como referencia:
+Corrido contra el dataset completo de extracción (665/665) y los datos reales
+(`python pipeline.py --fase 4`), con la fecha real de hoy como referencia:
 
 ```
 [SCORING]      1.308 leads elegibles (excluye 149 descartados + 49 secundarios)
-               24 CALIENTE · 20 TIBIO · 1.264 FRÍO
+               21 CALIENTE · 143 TIBIO · 1.144 FRÍO
 [ASIGNACIÓN]   688 de 1.308 asignados a un asesor hoy
                620 exceden la capacidad diaria combinada de su punto de venta
 ```
@@ -95,9 +111,12 @@ hoy como referencia:
 El sesgo hacia FRÍO no es un error: la mayoría de `leads.csv` se registró en agosto de
 2026, así que evaluados "hoy" (mediados de septiembre) la mayoría ya lleva semanas sin
 avance — exactamente el problema que describe el gerente. Con
-`--fecha-referencia 2026-09-06` (más cerca de cuando esos leads eran nuevos) el
-resultado sube a 154 CALIENTE / 26 TIBIO / 1.128 FRÍO, confirmando que el score
-responde correctamente al paso del tiempo, no que esté mal calibrado.
+`--fecha-referencia 2026-09-06` (más cerca de cuando esos leads eran nuevos) el balde
+CALIENTE sube considerablemente, confirmando que el score responde correctamente al paso
+del tiempo, no que esté mal calibrado.
+
+Estos mismos números están replicados en Supabase (producción) — se verificaron
+idénticos entre el SQLite local y Postgres tras correr la Fase 4 en ambos.
 
 Los **620 leads que exceden la capacidad diaria** son, en sí mismos, la cuantificación
 del reclamo original: *"estamos recibiendo más leads de los que alcanzamos a
@@ -128,8 +147,40 @@ data/raw/*.csv,json
   Base de datos (lead_scores + asignaciones)   [Fase 4 ✅]
         │
         ▼
-  Tablero "mis leads de hoy" filtrado por empresa   [Fases 5-6]
+  GitHub Actions (cron diario + disparo manual)   [Fase 5 ✅]
+        │
+        ▼
+  Tablero Streamlit "mis leads de hoy" filtrado por empresa   [Fase 6 ✅]
 ```
+
+### Fase 5 — automatización (detalle)
+
+Un solo trigger (`.github/workflows/pipeline.yml`) corre `python pipeline.py` completo:
+cron diario o botón manual en la pestaña Actions. El runner instala Ollama y descarga el
+modelo en cada corrida; como la Fase 2 es reanudable, solo la primera corrida contra una
+base vacía toma horas — las siguientes son incrementales (en la práctica, minutos).
+
+**Bug real encontrado validando contra Postgres real** (no solo SQLite, que nunca impuso
+foreign keys): el refresco completo de la Fase 1 hacía `DROP TABLE` sobre
+`leads`/`conversaciones`, y Postgres lo rechazaba porque `enriquecimiento_conversacion`/
+`lead_scores`/`asignaciones` tienen FK hacia esas tablas. Como los ids son deterministas
+desde los archivos crudos, el estado final siempre es consistente — el problema era solo
+el chequeo de FK a mitad de transacción. Se resolvió marcando esas FK como `DEFERRABLE
+INITIALLY DEFERRED` (se validan al `COMMIT`) y cambiando `DROP TABLE` por `DELETE` dentro
+de la misma transacción que repuebla los datos. Validado corriendo la Fase 1 dos veces
+seguidas contra Postgres con datos de Fase 2/4 ya poblados, sin perder ni corromper nada.
+
+### Fase 6 — tablero público (detalle)
+
+`tablero.py` (Streamlit) lee directo de la base — sin exportación ni snapshot intermedio.
+Muestra, por empresa: KPIs de temperatura y capacidad, la bandeja de gestión del día por
+asesor (filtrable por asesor/temperatura), y el desglose explicable del score de cada
+lead (aporte de cada componente del scorecard).
+
+**Simplificación deliberada**: selector de empresa en la UI en vez de login real. La
+separación de datos SÍ está garantizada (toda query filtra por `empresa_id`, y la Fase 4
+verificó 0 cruces reales entre asesores y leads de otra empresa) — lo que falta es
+autenticación, ver "Qué haría con más tiempo".
 
 ### Fase 3 — scoring: metodología y validación
 
@@ -157,9 +208,10 @@ justificación de cada peso en [`docs/scoring.md`](docs/scoring.md).
 | FRÍO (<40) | 612 | **5.56%** |
 
 **Lift CALIENTE vs. FRÍO: 2.89x** — supera el 2.6x que ya daba la urgencia sola: los
-componentes secundarios suman señal real. `src/scoring.py` existe y está validado, pero
-aún no está conectado a `leads` ni a la base de datos — es a propósito el checkpoint que
-el plan original marcó para revisar antes de persistir a producción (Fase 4).
+componentes secundarios suman señal real. Esta validación (CP2) se hizo *antes* de
+conectar `src/scoring.py` a la base de datos, a propósito: el plan original marcó este
+punto como checkpoint para revisar la metodología antes de persistir a producción
+(Fase 4), que ya está corriendo contra datos reales.
 
 ### Por qué no una arquitectura multi-agente
 
@@ -206,15 +258,17 @@ está lo condena a no recibir atención nunca — que es exactamente el problema
 su motivo y su payload original. Las 12 conversaciones huérfanas se cargan marcadas como
 tales en vez de borrarse.
 
-**El proveedor de IA es Groq por defecto, no Anthropic, por una restricción de
-presupuesto real: este proyecto no tiene presupuesto asignado para APIs de pago.** Groq
-ofrece una capa gratuita sin tarjeta de crédito, suficiente para el volumen del dataset
-(~665 conversaciones). La decisión no comprometió la arquitectura: `ClienteLLM` se
-definió como un `Protocol` desde el primer commit de la Fase 2, así que soportar un
-segundo proveedor fue añadir una clase (`ClienteGroq`) y una fábrica
-(`construir_cliente_llm()`) que elige según `PROVEEDOR_LLM` — cero cambios en
-`extraccion.py` ni en los tests que ya existían. Anthropic queda disponible como
-alternativa si en el futuro se prioriza calidad de extracción sobre costo.
+**El proveedor de IA terminó siendo Ollama local, no Groq, por la misma restricción de
+presupuesto que motivó elegir Groq en primer lugar.** Groq (capa gratuita, sin tarjeta)
+fue la primera opción por no requerir hardware propio, pero su cuota diaria (200.000
+tokens/modelo) resultó insuficiente para el batch completo — se agotó a mitad de camino
+más de una vez, incluso alternando entre sus dos modelos gratuitos. Ollama local no tiene
+cuota ni límite de tasa: el único techo es el hardware propio. La decisión no comprometió
+la arquitectura: `ClienteLLM` se definió como un `Protocol` desde el primer commit de la
+Fase 2, así que soportar un tercer proveedor fue añadir una clase (`ClienteOllama`) y
+extender la fábrica (`construir_cliente_llm()`) — cero cambios en `extraccion.py` ni en
+la lógica de negocio. Groq y Anthropic quedan disponibles como alternativas ya probadas y
+documentadas, intercambiables por variable de entorno.
 
 **La extracción con IA responde por `tool_choice` forzado, nunca por texto libre.** Pedirle
 al modelo que "responda en JSON" en un prompt de texto es la forma menos confiable de
@@ -266,6 +320,15 @@ en la rotación, así que termina con más leads sin necesitar una fórmula de r
 proporcional explícita — y ningún asesor se queda mirando una bandeja vacía mientras
 otro acapara todos los leads calientes.
 
+**Un lead puede tener más de una conversación vinculada — el score usa la más
+reciente.** 25 leads reales del dataset completo escribieron por WhatsApp más de una
+vez. El join original entre `leads` y `enriquecimiento_conversacion` producía una fila
+por conversación en vez de una por lead, y `persistir_scores` fallaba con
+`UNIQUE constraint failed` al correr contra el dataset completo. Se deduplica quedándose
+con la conversación de `fecha_inicio` más reciente por lead — el mismo criterio de
+"último avance real" que ya usa el componente de urgencia — para que el score refleje el
+estado más actual del cliente.
+
 ## Supuestos asumidos
 
 - `canal` en `leads.csv` es el canal de **origen**; la conversación de WhatsApp es el canal
@@ -298,6 +361,9 @@ otro acapara todos los leads calientes.
 
 ```
 ├── pipeline.py                   Punto de entrada (un solo disparo)
+├── tablero.py                    Fase 6 — tablero público (Streamlit)
+├── docker-compose.yml            Postgres local para validar antes de producción
+├── .github/workflows/pipeline.yml  Fase 5 — cron diario + disparo manual
 ├── src/
 │   ├── config.py                 Rutas, DATABASE_URL, umbrales, config del LLM
 │   ├── schema.py                 Esquema (16 tablas) — fuente única de verdad
@@ -306,7 +372,7 @@ otro acapara todos los leads calientes.
 │   ├── dedup.py                  R8 — identidad de persona
 │   ├── calidad.py                Reporte y métricas de calidad
 │   ├── esquema_extraccion.py     R13 — esquema Pydantic + validación semántica
-│   ├── llm_cliente.py            R13 — clientes Groq/Anthropic (tool-use forzado)
+│   ├── llm_cliente.py            R13 — clientes Ollama/Groq/Anthropic (tool-use forzado)
 │   ├── extraccion.py             R13 — orquestación: reintento, fallo, batch concurrente
 │   ├── scoring.py                Fase 3 — motor de scoring, funciones puras
 │   ├── validar_scoring.py        Fase 3 — validación retro-activa contra el histórico
@@ -315,13 +381,17 @@ otro acapara todos los leads calientes.
 ├── docs/
 │   ├── modelo-datos.md           ERD y decisiones de modelado
 │   ├── reglas-normalizacion.md   R1-R13 con evidencia del dataset
-│   └── scoring.md                Metodología del scorecard + validación (CP2)
-├── tests/                        135 tests sobre casos reales del dataset
+│   ├── scoring.md                Metodología del scorecard + validación (CP2)
+│   └── diagrama-arquitectura.html  Diagrama explorable de la arquitectura
+├── tests/                        153 tests sobre casos reales del dataset
 └── data/raw/                     Archivos fuente (sintéticos)
 ```
 
 ## Base de datos
 
-SQLAlchemy Core con `DATABASE_URL`: SQLite en local, Postgres/Supabase en producción, sin
-cambios en el código del pipeline. El DDL vive versionado en `db/schema.sql` y se regenera
-desde `src/schema.py`, que es la fuente única de verdad del modelo.
+SQLAlchemy Core con `DATABASE_URL`: SQLite en local, **Postgres en Supabase en
+producción** (proyecto real, no solo teórico), sin cambios en el código del pipeline. El
+DDL vive versionado en `db/schema.sql` y se regenera desde `src/schema.py`, que es la
+fuente única de verdad del modelo. `docker-compose.yml` levanta un Postgres local para
+probar contra el motor real antes de tocar producción — así se encontró el bug de FK
+descrito en la sección de Fase 5.
