@@ -6,6 +6,8 @@ las conversaciones de WhatsApp.
 
 Assessment técnico para el cargo de Analista de IA.
 
+**Tablero público**: [motos-leads-priorizacion.streamlit.app](https://motos-leads-priorizacion.streamlit.app/)
+
 ## El problema
 
 La comercializadora recibe más de 3.000 leads al mes por WhatsApp, campañas de Meta y el
@@ -37,7 +39,7 @@ después. Hoy, el 32 % de los leads no tiene registrado ningún primer contacto.
 | 4 | Persistencia final + asignación a asesores | ✅ 1.308 leads scoreados, 688 asignados hoy |
 | 5 | Automatización end-to-end | ✅ GitHub Actions (cron diario + disparo manual), validado con corrida real |
 | 6 | Publicación (tablero) | ✅ Streamlit Cloud, leyendo directo de Supabase |
-| 7 | Documentación y entregables | ⏳ en curso |
+| 7 | Documentación y entregables | ✅ README, diagrama, presentación (8 diapositivas) |
 
 ## Cómo se ejecuta
 
